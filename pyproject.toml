@@ -1,0 +1,18 @@
+[project]
+name = "runstate-tui"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = ["runstate"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["runstate_tui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
