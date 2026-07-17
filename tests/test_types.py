@@ -37,3 +37,24 @@ def test_status_severity_map():
     assert Status.pending().severity is Severity.INFO
     assert Status.live().severity is Severity.OK
     assert Status.terminal(Outcome.COMPLETED).severity is Severity.OK
+
+
+from runstate_tui.types import Row
+
+
+def _bare_row(**kw):
+    base = dict(status=Status.live(), frontier=10, freshness=1.0, value=None,
+                elapsed=5.0, episode=None, issues=())
+    base.update(kw)
+    return Row(**base)
+
+
+def test_row_is_a_frozen_value_for_the_singleton_test():
+    assert _bare_row() == _bare_row()
+
+
+def test_row_severity_is_max_of_status_and_issues():
+    torn = Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message="torn")
+    assert _bare_row().severity is Severity.OK
+    assert _bare_row(issues=(torn,)).severity is Severity.MEDIUM
+    assert _bare_row(status=Status.unreadable()).severity is Severity.HIGH

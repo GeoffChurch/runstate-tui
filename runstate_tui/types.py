@@ -87,3 +87,18 @@ class Status:
     @property
     def severity(self) -> Severity:
         return _STATUS_SEVERITY.get(self.kind, Severity.OK)
+
+
+@dataclass(frozen=True)
+class Row:
+    status: Status
+    frontier: int | None
+    freshness: float | None                      # age = max(0, now - last_activity)
+    value: tuple[str, object, int | None] | None  # (name, scalar, step)
+    elapsed: float | None                        # now - first started.t; None if no started
+    episode: str | None                          # latest_episode handle (PURE); None in Stage 0
+    issues: tuple[Issue, ...]
+
+    @property
+    def severity(self) -> Severity:
+        return max([self.status.severity, *(i.severity for i in self.issues)], key=int)
