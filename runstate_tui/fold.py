@@ -5,9 +5,10 @@ import sqlite3
 from collections.abc import Callable
 
 from runstate.channel import Channel
-from runstate.observables import MalformedRecordError
+from runstate.observables import MalformedRecordError, last_activity, peek_terminal
 
-from .types import Issue, IssueKind, Severity
+from .env import Env, Liveness, resolve_liveness
+from .types import Issue, IssueKind, Severity, Status
 
 _DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError, MalformedRecordError)
 
@@ -37,3 +38,26 @@ def guarded(fn: Callable[[Channel], object], channel: Channel) -> tuple[object |
             seq = locate_torn_seq(channel)
         message = f"log torn at seq {seq}" if seq is not None else "log torn"
         return None, Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message=message, seq=seq)
+
+
+def reconcile_status(channel: Channel, env: Env, now: float) -> tuple[Status, float | None, list[Issue]]:
+    issues: list[Issue] = []
+    result, term_issue = guarded(peek_terminal, channel)
+    if term_issue is not None:
+        issues.append(term_issue)
+
+    la, la_issue = guarded(last_activity, channel)   # the ONE last_activity read
+    if la_issue is not None:
+        issues.append(la_issue)
+    freshness = None if la is None else max(0.0, now - la)
+    if isinstance(la, (int, float)) and not isinstance(la, bool) and la > now:
+        issues.append(Issue(kind=IssueKind.SKEW_SUSPECTED, severity=Severity.MEDIUM,
+                            message="last activity is in the future (clock skew)"))
+
+    if result is not None:
+        return Status.terminal(result.outcome), freshness, issues  # terminal wins
+    if la is None:
+        return Status.pending(), freshness, issues  # no dated activity at all
+    verdict = resolve_liveness(channel, env, now, la)
+    status = Status.live() if verdict is Liveness.LIVE else Status.stale()
+    return status, freshness, issues

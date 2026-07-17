@@ -29,3 +29,36 @@ def test_guarded_recovers_seq_from_a_schema_invalid_record_via_exc_seq(build_log
     assert value is None
     assert issue.kind is IssueKind.TORN
     assert issue.seq == 1
+
+
+from runstate.observables import Outcome
+from runstate_tui.env import Env
+from runstate_tui.fold import reconcile_status
+from runstate_tui.types import StatusKind
+
+
+def _env(now, **kw):
+    return Env(clock=lambda: now, stuck_threshold=60.0, **kw)
+
+
+def test_terminal_wins(build_log):
+    ch = build_log([
+        ({"handle": "local://h/1", "t": 1.0}, "lifecycle.started", None),
+        ({"completed": True, "error": None, "final_step": 3, "t": 2.0}, "lifecycle.stopped", None),
+    ])
+    status, freshness, issues = reconcile_status(ch, _env(100.0), now=100.0)
+    assert status.kind is StatusKind.TERMINAL and status.outcome is Outcome.COMPLETED
+    assert issues == []
+
+
+def test_pending_when_no_dated_activity(build_log):
+    ch = build_log([])
+    status, freshness, _ = reconcile_status(ch, _env(100.0), now=100.0)
+    assert status.kind is StatusKind.PENDING and freshness is None
+
+
+def test_live_then_stale_by_freshness(build_log):
+    ch = build_log([({"step": 0, "consumed_seq": 0, "t": 100.0}, "lifecycle.heartbeat", None)])
+    status, freshness, _ = reconcile_status(ch, _env(100.0), now=100.0)
+    assert status.kind is StatusKind.LIVE and freshness == 0.0
+    assert reconcile_status(ch, _env(1000.0), now=1000.0)[0].kind is StatusKind.STALE
