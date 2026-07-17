@@ -351,9 +351,13 @@ resolver + pool complexity.
   `TornRecordError` nicety only (§3.3, §8).
 - **`run_epoch`** — not needed (wall-age derives today); a deferred +1 to runstate's own plan (§8).
 - **`max_seq=`** — Stage-4 only; `max_seq`, never `before=` (§3.2, §8).
-- **Metric-name discovery (H1)** — the value objective is hand-configured (injected) in the core; a
-  later metric-picker discovers names **lazily** (a bounded, opt-in cursor over unfiltered value
-  records that fills the menu as metrics appear) — no upstream ask.
+- **Metric-name discovery (H1)** — the value objective is hand-configured (injected) in the core. A
+  later metric-picker discovers names **lazily**, but the lazy set is only a *lower bound* (metrics
+  logged before attach / not yet seen are absent), so the picker **labels it "seen so far
+  (partial)"** and offers an **explicit, opt-in, marked-expensive full-log scan** for the complete
+  set (off the hot path — distinct from the banned per-frame `value_series` replay). Upstream
+  investigation backlogged (`docs/backlog/metric-discovery.md`): a runstate name-enumeration API
+  would make the complete list cheap — file only on demand.
 - **Pure verdict fold (H3)** — Stage 0 calls `peek_terminal` (accept the rare cosmetic tear); a pure
   `[Envelope] → RunResult` fold is a small upstream nicety for the atomic verdict read (§3.2).
 
