@@ -71,3 +71,18 @@ def read_value(channel: Channel, objective: str | None) -> tuple[str, object, in
     if e is None:
         return None
     return (objective, e.body.get("value"), e.body.get("step"))
+
+
+def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
+    started = channel.read(topics=[Topic.LIFECYCLE_STARTED], limit=1)
+    if not started:
+        return None, None
+    t = started[0].body.get("t")
+    if not isinstance(t, (int, float)) or isinstance(t, bool):
+        return None, None
+    if t > now:
+        return 0.0, Issue(
+            kind=IssueKind.SKEW_SUSPECTED, severity=Severity.MEDIUM,
+            message="run epoch is in the future (clock skew)", detail=f"started.t={t} > now={now}",
+        )
+    return now - float(t), None

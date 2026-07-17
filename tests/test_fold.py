@@ -64,7 +64,7 @@ def test_live_then_stale_by_freshness(build_log):
     assert reconcile_status(ch, _env(1000.0), now=1000.0)[0].kind is StatusKind.STALE
 
 
-from runstate_tui.fold import read_value
+from runstate_tui.fold import read_value, read_elapsed
 
 
 def test_value_is_named_and_none_without_an_objective(build_log):
@@ -75,3 +75,24 @@ def test_value_is_named_and_none_without_an_objective(build_log):
     assert read_value(ch, objective=None) is None            # never nameless
     assert read_value(ch, objective="loss") == ("loss", 0.5, 4)
     assert read_value(ch, objective="missing") is None
+
+
+def test_elapsed_is_wall_age_from_first_started(build_log):
+    ch = build_log([
+        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+        ({"handle": "local://h/2", "t": 200.0}, "lifecycle.started", None),  # a later episode
+    ])
+    elapsed, issue = read_elapsed(ch, now=250.0)
+    assert elapsed == 150.0 and issue is None  # from the FIRST started (100.0), not the latest
+
+
+def test_elapsed_none_without_a_started(build_log):
+    ch = build_log([({"step": 0, "consumed_seq": 0, "t": 1.0}, "lifecycle.heartbeat", None)])
+    assert read_elapsed(ch, now=9.0) == (None, None)
+
+
+def test_elapsed_never_negative_and_flags_skew(build_log):
+    ch = build_log([({"handle": "local://h/1", "t": 500.0}, "lifecycle.started", None)])
+    elapsed, issue = read_elapsed(ch, now=100.0)  # started stamped in the future
+    assert elapsed == 0.0
+    assert issue.kind is IssueKind.SKEW_SUSPECTED
