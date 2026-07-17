@@ -62,3 +62,16 @@ def test_live_then_stale_by_freshness(build_log):
     status, freshness, _ = reconcile_status(ch, _env(100.0), now=100.0)
     assert status.kind is StatusKind.LIVE and freshness == 0.0
     assert reconcile_status(ch, _env(1000.0), now=1000.0)[0].kind is StatusKind.STALE
+
+
+from runstate_tui.fold import read_value
+
+
+def test_value_is_named_and_none_without_an_objective(build_log):
+    ch = build_log([
+        ({"value": 0.5, "step": 4, "t": 1.0}, "value", "loss"),
+        ({"value": 0.9, "step": 4, "t": 1.0}, "value", "acc"),
+    ])
+    assert read_value(ch, objective=None) is None            # never nameless
+    assert read_value(ch, objective="loss") == ("loss", 0.5, 4)
+    assert read_value(ch, objective="missing") is None

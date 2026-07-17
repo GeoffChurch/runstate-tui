@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from runstate.channel import Channel
 from runstate.observables import MalformedRecordError, last_activity, peek_terminal
+from runstate.vocabulary.payloads import Topic
 
 from .env import Env, Liveness, resolve_liveness
 from .types import Issue, IssueKind, Severity, Status
@@ -61,3 +62,12 @@ def reconcile_status(channel: Channel, env: Env, now: float) -> tuple[Status, fl
     verdict = resolve_liveness(channel, env, now, la)
     status = Status.live() if verdict is Liveness.LIVE else Status.stale()
     return status, freshness, issues
+
+
+def read_value(channel: Channel, objective: str | None) -> tuple[str, object, int | None] | None:
+    if objective is None:
+        return None
+    e = channel.latest(Topic.VALUE, name=objective)
+    if e is None:
+        return None
+    return (objective, e.body.get("value"), e.body.get("step"))
