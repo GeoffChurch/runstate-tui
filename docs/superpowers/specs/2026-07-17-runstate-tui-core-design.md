@@ -126,6 +126,10 @@ Only the **verdict/liveness reconciliation** can manufacture a false verdict, an
 are cosmetic (`loss @ 4012` vs `4013`) and provably never cross a precedence boundary. The
 `last_seq()` whole-fold bracket is retired (real, but livelocks under a hot writer); the
 `max_seq=`/`before=` upstream ask is a **Stage-4 uniformity nicety**, not on the Stage-0 path.
+Caveat (H3): `peek_terminal` is itself ~4 separate seeks today, so Stage 0 *calls* it and accepts
+the rare cosmetic verdict tear; making the atomic read *the* verdict source would need a pure
+`[Envelope] → RunResult` fold upstream (§8/§12), not an in-tree re-derivation of the `Outcome`
+mapping (which would be the F7 drift §4 forbids).
 
 ### 3.3 Issues
 
@@ -136,9 +140,10 @@ key** (spawn order / `run_id`), so live-view rows don't jitter as transient issu
 Severity: **high** = `unreadable`, `UnsafeStop`; **medium** = `conflicted`, `Torn`,
 `SkewSuspected`; **informational** = `pending`, `missing`.
 
-The `⚠ torn at seq N` **precision depends on the seq**, which a bare `JSONDecodeError` does not
-carry — so the §8 "total observation" upstream ask is a **prerequisite for this badge**, not an
-optional item. Without it the issue reads `⚠ log torn` (no seq).
+The `⚠ torn at seq N` precision needs the seq, which a bare `JSONDecodeError` does not carry — but
+the cockpit **recovers it in-tree**: on a decode failure it locates the torn seq via a bounded
+`read(after=k, limit=1)` walk (append-only contiguity), on the rare torn path only. A seq-carrying
+substrate error upstream is therefore an *optional* ergonomic nicety, **not** a prerequisite (§8).
 
 The integrity set is bounded (failure modes of {open, observe, resolve, control}) but **treat it
 as open** — do not assume the list is exhaustive. **Alarm flood** at table scale (a shared-FS
@@ -246,19 +251,37 @@ aggregation (Stage 4), API-gap surfacing (dev-only).
 (a finding); sibling library iff *general observer machinery* that is consumer-side policy;
 cockpit iff *presentation/product opinion*.
 
-**Findings to file upstream:**
-- **`create=False` / read-only open — HIGH; gates safe Stage-4 globbing.** `executescript(_SCHEMA)`
-  at open crashes on a corrupt/foreign db (`sqlite3.DatabaseError`) and **silently schema-mutates
-  a foreign valid db**. Only `create=False` prevents the mutation. mycooc's raw `?mode=ro`
-  bypass (`run_experiment.py:2394`) is the evidence.
-- **Total observation — prerequisite for the `⚠ torn at seq N` badge (§3.3), not optional.** A
-  total `Log → Value + Issue` surface that carries the seq, widened beyond `MalformedRecordError`
-  to the substrate `JSONDecodeError`/`sqlite3.DatabaseError` that escape below the observable.
-- **Safe-stop predicate** — "served now, or armed for next episode?". `await_consumed` answers
-  *was my stop consumed*, not *will it be served or armed* — the predicate is still missing.
-- **`run_epoch`** — for true accumulated runtime; elapsed today is wall-age (§4).
-- **(Stage-4) `max_seq=`/`before=` read bound** — uniformity nicety for a materialized snapshot;
-  not on the Stage-0 path (§3.2).
+**Upstream findings — disposition (the prerequisite red-team collapsed five asks to one).** Only
+`create=False` is a genuine filing; the rest dissolve in-tree, derive today, or self-defer. All are
+additive (no wire/schema bump).
+- **`create=False` / read-only open — FILE (the one real ask).** `executescript(_SCHEMA)` at open
+  **silently schema-mutates a foreign *valid* db** (adds a `log` table to a file we don't own),
+  rendering it empty. `stat-before-open` handles the missing-pointer phantom and our outer guard
+  catches the corrupt-db crash → `unreadable`, but **neither catches the mutation** (the file
+  exists; the mutation is *at open*), and no in-tree probe can (magic bytes are identical; a
+  read-only sqlite probe is the banned `?mode=ro`). Already runstate's open item 4; filed with the
+  mutation harm (runstate PR #14). Gates safe Stage-4 globbing; Stage-1 explicit-run is lower risk.
+- **Total observation — do NOT file as a prerequisite; dissolve in-tree.** The `⚠ torn at seq N`
+  badge is not blocked — the cockpit locates the torn seq via a bounded `read(after=k, limit=1)`
+  walk (§3.3). *Optionally* file a low-priority seq-carrying `TornRecordError` at the substrate
+  decode boundary — narrow ("give the decode error its seq"), **never** "make the observables
+  total" (that changes return types and blasts the Watcher, which deliberately propagates
+  `MalformedRecordError`).
+- **Safe-stop — do NOT file "served-vs-armed"; report the finding.** The "armed for the next
+  episode" half depends on a *future relaunch*, which run-episodes makes **caller policy**
+  ("idle-may-relaunch and finished are identical on the log") — runstate can't answer it. The
+  actionable gate (a live episode to serve it *now*?) dissolves in-tree: `live_episode` + freshness
+  + a bounded `await_consumed` → `UnsafeStop`. runstate's item 6 suspects the shipped observer clock
+  already dissolves it — so we report that. Optional residual: an atomic *send-with-live-witness* to
+  close a TOCTOU.
+- **`run_epoch` — not a cockpit prerequisite.** Wall-age `elapsed` derives today
+  (`read([started], limit=1).t`). runstate independently plans `observables.run_epoch` and names the
+  cockpit its second-consumer trigger — a light deferred +1. It's a *birth anchor* (= wall-age),
+  **not** "accumulated runtime" (a separate cockpit-side fold over started/stopped pairs).
+- **`max_seq=` — not a prerequisite; Stage-4.** If ever filed: the `max_seq` (seq) bound **only,
+  never `before=`** (t is never an ordering key), framed as a bound on the `last_seq` coordinate the
+  viewer already asserts — riding the principle that admitted `last_seq`, **never** the generic
+  `read_range` runstate already rejected.
 
 **The observer core does NOT go upstream** (it would make runstate test itself, killing the
 acceptance-test property). **Sibling library — later, on a real second consumer.** runstate's own
@@ -320,11 +343,19 @@ resolver + pool complexity.
 ## 12. Open questions / deferred (decide at first touch)
 
 - **Liveness overlay** — `docs/backlog/liveness-overlay.md`; the seam is committed (§14.2).
-- **Safe stop** — the served-vs-armed predicate; surface `UnsafeStop` until it ships.
-- **`create=False` open** — defended open + `unreadable` now; gates safe Stage-4 globbing.
-- **`run_epoch`** — elapsed is wall-age today; promote for accumulated runtime.
-- **Total observation** — prerequisite for the seq-precise `Torn` badge (§3.3, §8).
-- **`max_seq=`/`before=`** — Stage-4 snapshot uniformity (§3.2).
+- **`create=False` open** (the one real upstream ask) — filed, runstate PR #14; `unreadable` +
+  stat-before-open now; gates safe Stage-4 globbing (§8).
+- **Safe stop** — derive the served gate in-tree, surface `UnsafeStop`; the literal served-vs-armed
+  is partly caller policy, not filed (§8).
+- **Total observation** — not filed; seq recovered in-tree via a bounded walk; optional
+  `TornRecordError` nicety only (§3.3, §8).
+- **`run_epoch`** — not needed (wall-age derives today); a deferred +1 to runstate's own plan (§8).
+- **`max_seq=`** — Stage-4 only; `max_seq`, never `before=` (§3.2, §8).
+- **Metric-name discovery (H1)** — the value objective is hand-configured (injected) in the core; a
+  later metric-picker discovers names **lazily** (a bounded, opt-in cursor over unfiltered value
+  records that fills the menu as metrics appear) — no upstream ask.
+- **Pure verdict fold (H3)** — Stage 0 calls `peek_terminal` (accept the rare cosmetic tear); a pure
+  `[Envelope] → RunResult` fold is a small upstream nicety for the atomic verdict read (§3.2).
 
 ### Known gaps (resolve before/at the relevant stage)
 
@@ -388,7 +419,7 @@ class Row:
     freshness: float | None                                 # age = max(0, now - last_activity)
     value: tuple[str, object, int | None] | None            # (name, scalar, step) via latest(VALUE, name=objective)
     elapsed: float | None                                   # now - first started.t; None if no started (render "—")
-    episode: str | None                                     # live_episode (drill-down)
+    episode: str | None                                     # latest_episode handle (PURE; NOT live_episode -> os.kill, §2.1)
     undischarged_stops: list[Envelope]                      # drill-down
     live_demand: list[Envelope]                             # drill-down (cheap)
     issues: list[Issue]
