@@ -96,3 +96,34 @@ def test_elapsed_never_negative_and_flags_skew(build_log):
     elapsed, issue = read_elapsed(ch, now=100.0)  # started stamped in the future
     assert elapsed == 0.0
     assert issue.kind is IssueKind.SKEW_SUSPECTED
+
+
+from runstate_tui import status_fold
+from runstate_tui.types import Row, StatusKind
+
+
+def test_status_fold_on_a_healthy_live_run(build_log):
+    ch = build_log([
+        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
+        ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
+    ])
+    row = status_fold(ch, _env(150.0, objective="loss"))
+    assert isinstance(row, Row)
+    assert row.status.kind is StatusKind.LIVE
+    assert row.frontier == 7
+    assert row.value == ("loss", 0.03, 7)
+    assert row.elapsed == 50.0
+    assert row.freshness == 10.0
+    assert row.issues == ()
+
+
+def test_status_fold_degrades_one_torn_factor_not_the_whole_row(torn_sqlite_channel):
+    # a torn heartbeat: frontier is lost + a Torn issue, but the run's verdict survives
+    ch = torn_sqlite_channel([
+        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
+    ], torn_seq=2)
+    row = status_fold(ch, _env(150.0))
+    assert row.status.kind is not StatusKind.UNREADABLE      # NOT collapsed to unreadable
+    assert any(i.kind is IssueKind.TORN for i in row.issues)  # the torn factor is surfaced

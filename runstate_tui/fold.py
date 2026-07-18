@@ -5,11 +5,11 @@ import sqlite3
 from collections.abc import Callable
 
 from runstate.channel import Channel
-from runstate.observables import MalformedRecordError, last_activity, peek_terminal
+from runstate.observables import MalformedRecordError, last_activity, peek_terminal, progress
 from runstate.vocabulary.payloads import Topic
 
 from .env import Env, Liveness, resolve_liveness
-from .types import Issue, IssueKind, Severity, Status
+from .types import Issue, IssueKind, Row, Severity, Status
 
 _DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError, MalformedRecordError)
 
@@ -86,3 +86,23 @@ def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | No
             message="run epoch is in the future (clock skew)", detail=f"started.t={t} > now={now}",
         )
     return now - float(t), None
+
+
+def status_fold(channel: Channel, env: Env) -> Row:
+    now = env.clock()  # captured once per frame, threaded below
+    issues: list[Issue] = []
+
+    status, freshness, status_issues = reconcile_status(channel, env, now)
+    issues.extend(status_issues)
+
+    frontier, frontier_issue = guarded(progress, channel)
+    if frontier_issue is not None:
+        issues.append(frontier_issue)
+
+    value = read_value(channel, env.objective)
+    elapsed, elapsed_issue = read_elapsed(channel, now)
+    if elapsed_issue is not None:
+        issues.append(elapsed_issue)
+
+    return Row(status=status, frontier=frontier, freshness=freshness, value=value,
+               elapsed=elapsed, episode=None, issues=tuple(issues))
