@@ -28,9 +28,18 @@ def format_row(row: Row) -> str:
 
 
 def format_envelope(env: Envelope) -> str:
-    """One compact line for the raw log tail: seq, topic, request_id?, body."""
+    """One compact line for the raw log tail: seq, topic, request_id?, body.
+
+    A normal dict body's string values are already `repr()`'d as part of
+    `str(dict)` (an embedded "\\n" prints as the two literal characters
+    backslash-n), but an alien non-dict body is interpolated raw — a real
+    control char in it (an embedded newline/CR/tab) would otherwise reach
+    `RichLog.write` and split one envelope across multiple physical lines.
+    Escape control chars in the rendered body so one envelope is always
+    exactly one line."""
     rid = f"  {env.request_id}" if env.request_id else ""
-    return f"{env.seq:>5}  {env.topic:<20}{rid}  {env.body}"
+    body = str(env.body).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return f"{env.seq:>5}  {env.topic:<20}{rid}  {body}"
 
 
 def format_detail(row: Row) -> str:

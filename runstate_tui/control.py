@@ -9,6 +9,7 @@ from pathlib import Path
 
 from runstate import RunResult, await_consumed, open_channel
 from runstate.channel import Channel
+from runstate.observables import MalformedRecordError, peek_terminal
 from runstate.vocabulary.payloads import Nak, Topic
 
 from .resolver import RunRef
@@ -24,6 +25,7 @@ class StopResult(Enum):
     DIED = "died"  # run ended under the request (await_consumed -> RunResult)
     UNSAFE = "unsafe"  # sent, not consumed within the bound — may never be served
     UNDELIVERED = "undelivered"  # never appended (missing/unreadable run, or a lost claim)
+    MOOT = "moot"  # run already ended BEFORE the stop was sent — never sent at all
 
 
 _STOP_SEVERITY = {
@@ -32,6 +34,7 @@ _STOP_SEVERITY = {
     StopResult.REFUSED: Severity.MEDIUM,
     StopResult.UNSAFE: Severity.HIGH,
     StopResult.UNDELIVERED: Severity.HIGH,
+    StopResult.MOOT: Severity.MEDIUM,
 }
 
 _STOP_LABEL = {
@@ -40,6 +43,7 @@ _STOP_LABEL = {
     StopResult.REFUSED: "✗ stop refused",
     StopResult.UNSAFE: "⚠ unsafe stop",
     StopResult.UNDELIVERED: "⚠ stop not delivered",
+    StopResult.MOOT: "◼ run already ended",
 }
 
 
@@ -59,6 +63,24 @@ class StopOutcome:
         return f"{base}: {self.detail}" if self.detail else base
 
 
+def _already_ended(channel: Channel) -> str | None:
+    """Peek (never send) for an existing terminal, so a stop against a run that
+    already ended can be recognized as MOOT before it ever touches the log.
+
+    Returns the terminal outcome's value (str) if the run has already ended,
+    else None. A `MalformedRecordError` (a decodable-but-wrong-shape terminal
+    record) can't confirm the run ended — degrade to None and let the caller
+    proceed to send (consistent with `fold.py`'s `guarded` degradation). A
+    byte-torn body (`json.JSONDecodeError`) is NOT caught here — it propagates,
+    consistent with the corrupt taxonomy elsewhere (an undecodable substrate is
+    not this function's call to make)."""
+    try:
+        result = peek_terminal(channel)
+    except MalformedRecordError:
+        return None
+    return None if result is None else str(result.outcome)
+
+
 def stop_run(
     channel: Channel,
     *,
@@ -72,7 +94,15 @@ def stop_run(
     An empty StopTrigger body (`{}`) is a `from`-less one-shot: the worker fires
     it at the next safe point. `await_consumed`'s codomain is the whole answer
     space — None (accepted) | Nak (refused) | RunResult (died under the
-    request) | TimeoutError (not drained in time)."""
+    request) | TimeoutError (not drained in time).
+
+    BEFORE sending, peek for an existing terminal: a stop against a run that
+    already ended is MOOT, not UNSAFE — UNSAFE means "sent to a live run, not
+    answered"; a moot stop is never sent at all, so it never writes a pointless
+    `control.stop` into a finished run's log."""
+    existing = _already_ended(channel)
+    if existing is not None:
+        return StopOutcome(StopResult.MOOT, request_id, f"run already ended ({existing})")
     seq = channel.send({}, topic=Topic.CONTROL_STOP, request_id=request_id)
     if seq is None:  # provably-lost claim — only reachable with expected_seq; defensive
         return StopOutcome(StopResult.UNDELIVERED, request_id, "stop was not appended (lost claim)")

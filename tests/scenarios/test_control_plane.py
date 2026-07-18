@@ -254,12 +254,11 @@ def test_unsafe_timeout(build_log):
 
 
 def test_sent_after_terminal_is_unsafe_not_died(build_log):
-    # FINDING: UNSAFE conflates "no worker yet" with "run already over" --
-    # started -> stopped (seq 2) -> a FRESH stop (seq 3), sent AFTER the
-    # terminal. await_consumed only returns the terminal RunResult (DIED) for a
-    # request a terminal record FOLLOWS by seq; here the terminal PRECEDES the
-    # request, so it just waits for a next episode that never comes and times
-    # out -- UNSAFE, indistinguishable from "nobody is running this at all".
+    # A stop dispatched AFTER the run already ended (started -> stopped at seq
+    # 2, request filed at seq 3) is MOOT, not UNSAFE: stop_run peeks for an
+    # existing terminal BEFORE sending, so this never reaches await_consumed's
+    # timeout at all -- and the peek-before-send short-circuit means no
+    # control.stop is appended to a log that already has its terminal.
     ch = build_log(
         [
             ({"handle": "h", "t": 1.0}, "lifecycle.started", None),
@@ -272,8 +271,11 @@ def test_sent_after_terminal_is_unsafe_not_died(build_log):
     )
     now, sleep = fake_clock(100.0, 100.0, 101.0, 102.0, 103.0, 104.0)
     outcome = stop_run(ch, request_id="webui:after", timeout=1.0, now=now, sleep=sleep)
-    assert outcome.result is StopResult.UNSAFE
+    assert outcome.result is StopResult.MOOT
+    assert outcome.result is not StopResult.UNSAFE
     assert outcome.result is not StopResult.DIED
+    assert outcome.detail == "run already ended (completed)"
+    assert ch.read(topics=[Topic.CONTROL_STOP]) == []  # short-circuited before send
 
 
 def test_dispatch_stop_missing_no_phantom(tmp_path):
