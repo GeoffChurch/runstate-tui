@@ -113,6 +113,24 @@ def test_dispatch_stop_opens_sends_and_reports_unsafe_when_unserved(tmp_path):
     assert outcome.result is StopResult.UNSAFE
 
 
+def test_dispatch_stop_unopenable_run_is_undelivered(tmp_path):
+    # a real file that is NOT a valid sqlite db: stat passes, open_channel raises
+    (tmp_path / "garbage.db").write_bytes(b"not a sqlite database\x00\x01")
+    outcome = dispatch_stop(("garbage", str(tmp_path), "sqlite"), request_id="webui:g", timeout=1.0)
+    assert outcome.result is StopResult.UNDELIVERED
+    assert outcome.detail == "run could not be opened"
+
+
+def test_dispatch_stop_unreadable_run_is_undelivered(tmp_path):
+    # root points at a regular file, so stat(<file>/run.db) raises NotADirectoryError (OSError)
+    not_a_dir = tmp_path / "not_a_dir"
+    not_a_dir.write_text("x")
+    outcome = dispatch_stop(("run", str(not_a_dir), "sqlite"), request_id="webui:n", timeout=1.0)
+    assert outcome.result is StopResult.UNDELIVERED
+    assert outcome.detail == "run is unreadable"
+    assert not (not_a_dir / "run.db").exists()  # never fabricated
+
+
 def test_stop_outcome_label_and_severity():
     assert StopOutcome(StopResult.ACCEPTED, "webui:x").severity is Severity.OK
     assert StopOutcome(StopResult.ACCEPTED, "webui:x").label == "✓ stop accepted"

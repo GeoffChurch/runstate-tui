@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 import uuid
 from collections.abc import Callable
@@ -102,7 +103,13 @@ class SingleRunApp(App[None]):
                 StopResult.UNDELIVERED, request_id, f"stop dispatch error: {exc!r}"
             )
         finally:
-            self.call_from_thread(self._finish_stop, outcome)
+            try:
+                self.call_from_thread(self._finish_stop, outcome)
+            except (RuntimeError, concurrent.futures.CancelledError):
+                # the app is tearing down (loop closed / callback cancelled) while a
+                # stop was in-flight: it was already SENT; drop the result-marshal
+                # rather than crash the daemon thread with a teardown traceback.
+                pass
 
     def _finish_stop(self, outcome: StopOutcome) -> None:
         self._stop_in_flight = False
