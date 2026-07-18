@@ -462,3 +462,61 @@ coproduct absorbs the overlay's new members (`presumed_dead`, probe-`conflicted`
 `undischarged_stops`, `latest(Topic.VALUE, name=objective)`, and the first `lifecycle.started.t`
 (elapsed) — plus `open_channel`, `Watcher`, `await_consumed`. `value_series` is deliberately
 **unused** (no data-plane replay).
+
+---
+
+## Post-Stage-3 revisions (2026-07-18)
+
+These reconcile the design of record with what Stages 0–3, the fixture basis, and a 3-lens
+adversarial red-team taught us. All four are **refinements/additions, not reversals** — the §1
+initiality spine and the §11 singleton acceptance held unchanged **by construction** and were
+vindicated (the table is still `map(fold)`; the singleton test guarded every stage). Detail lives
+in the session memories (`runstate-tui-event-driven-architecture`,
+`faithful-representation-over-lossy-reuse`) and `docs/backlog/`.
+
+**R1 — `conflicted` migrates out of the pure-fold integrity arm (revises §4, §4.1).** §4 listed
+`conflicted` as if the fold could derive it. The red-team proved otherwise (verified vs
+`runstate/observables.py`): a pure `lifecycle.*`/`control.*` record check fires on *ordinary
+crash+relaunch* — `live_episode` declares an episode dead via `resolve(handle) is False` with **no**
+`lifecycle.stopped`, so `started → … → started` (no stop between) is the system's normal recovery
+shape; and narrowing to those topics discards the `launcher.terminated` evidence `peek_terminal`
+already uses. Reliable `conflicted` needs the **liveness overlay's** `resolve()`/`launcher.terminated`
+corroboration → it is an *overlay* member (with `presumed_dead`, `probe-conflicted`), **not** a fold
+member. So the integrity arm splits: **fold-derivable** `{missing, unreadable, corrupt}` ⊎
+**overlay-derivable** `{conflicted, presumed_dead, probe-conflicted}`. When built it is a MEDIUM
+*issue* on the real verdict, never a dominating status; its prerequisite is a **product call** on the
+row-3-vs-row-4 tension (see R4). Do **not** re-derive the verdict fold in-tree (§3.2/§8 — the F7
+drift §4 forbids). See `docs/backlog/liveness-overlay.md`.
+
+**R2 — a second plane: aggregation vs query (extends §1, §6.3, §13).** §1's factorization
+`render = aggregate ∘ map(status_fold) ∘ resolve` covers the **aggregation** plane only — the
+parameter-free `Row` functor. Development revealed a distinct **query** plane: the raw log view (and
+future filtering/scrollback) is a *parameterized traversal* indexed by interactive **view state**,
+**not** a `Row` factor — `log_view = window ∘ filter ∘ read`, made incremental by the `last_seq()`
+watermark (`read(after=cursor)`). This is the categorical form of §13's "pure-projection core + thin
+reactive shell": the fold is the core; the log query is the shell. §6.3's "drill-down = codomain
+refinement" is therefore only half true — episode/undischarged_stops/live_demand *are* finer fold
+factors, but the raw tail is a query. The unifying operational law across fold, log-pane, resolver,
+and DataTable is **"poll a cheap watermark, apply the delta, never rebuild."** See the
+`runstate-tui-event-driven-architecture` memory.
+
+**R3 — the defense is three-homed; "faithful representation over lossy reuse" is a law (revises §3,
+§4).** The §3.1 second tier is not uniform. Three homes, decided by where each failure can
+originate: the **open guard** → `unreadable` (whole-run substrate fault); the **fold-boundary
+guard** → `corrupt` (whole-run — an *undecodable* committed body, `json.JSONDecodeError` = an
+atomicity violation, carrying the torn seq); the **per-read guard** → a `malformed` *issue*
+(per-factor — a *decodable-but-wrong-shape* record: `MalformedRecordError`/`AttributeError`/
+`TypeError`, with the exact exception in `Issue.detail`). This is the dual of §4's "unknown renders
+honestly or crashes verbosely": **never collapse a distinct condition into a near category when the
+reuse is lossy** — it governed `corrupt`≠`unreadable`, the stop `MOOT`≠`UNSAFE`, and retaining
+`RunResult.error` on `Status.detail`. The original `IssueKind.TORN` MEDIUM-⚠ treatment is superseded
+(byte-torn is now loud whole-run `corrupt`, not a dismissible per-factor issue). See the
+`faithful-representation-over-lossy-reuse` memory.
+
+**R4 — a policy layer beyond the lattice (revises §4.1, §14.1).** §4.1 framed conflict/precedence as
+pure lattice structure. But the row-3-vs-row-4 question — *is a heartbeat 1s after a terminal a
+benign straggler or a contradiction?* — is a **threshold-gated product judgment**, the same shape as
+`stuck_threshold`, not a structural fact (no upstream primitive tells you *how far after* counts). So
+`Env`-as-presentation-policy is **broader** than the freshness lattice: it carries conflict-policy
+thresholds the design had framed as precedence. Some determinations the lattice appeared to settle
+are, in fact, cockpit policy.
