@@ -44,18 +44,22 @@ def locate_torn_seq(channel: Channel) -> int | None:
 
 
 def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Issue | None]:
-    """Run a read; a MalformedRecordError (runstate's typed schema-invalid signal, e.g.
-    version skew) degrades to a MALFORMED issue so the run's other factors survive. A
-    byte-torn body (json.JSONDecodeError) and a substrate fault (sqlite3.DatabaseError)
-    are NOT caught here — the former propagates to crash (an atomicity violation), the
-    latter is caught at the open_and_fold boundary as `unreadable`."""
+    """A read that degrades a decodable-but-wrong-shape record to a MALFORMED issue so
+    the run's other factors survive: runstate's MalformedRecordError (schema-invalid), or
+    an AttributeError/TypeError from a non-dict body (`42`, `[1,2,3]`). The exact exception
+    is retained in `detail`. A byte-torn body (json.JSONDecodeError) is NOT caught here — it
+    propagates to open_and_fold as whole-run `corrupt` (undecodable substrate)."""
     try:
         return fn(channel), None
-    except MalformedRecordError as exc:
+    except (MalformedRecordError, AttributeError, TypeError) as exc:
         seq = getattr(exc, "seq", None)
-        message = f"record malformed at seq {seq}" if seq is not None else "record malformed"
+        loc = f" at seq {seq}" if seq is not None else ""
         return None, Issue(
-            kind=IssueKind.MALFORMED, severity=Severity.MEDIUM, message=message, seq=seq
+            kind=IssueKind.MALFORMED,
+            severity=Severity.MEDIUM,
+            message=f"record malformed{loc}",
+            seq=seq,
+            detail=f"{type(exc).__name__}: {exc}",
         )
 
 
@@ -70,6 +74,16 @@ def reconcile_status(
     la, la_issue = guarded(last_activity, channel)  # the ONE last_activity read
     if la_issue is not None:
         issues.append(la_issue)
+    if la is not None and not math.isfinite(la):
+        issues.append(
+            Issue(
+                kind=IssueKind.MALFORMED,
+                severity=Severity.HIGH,
+                message="activity timestamp is not finite (garbage clock)",
+                detail=f"last_activity={la!r}",
+            )
+        )
+        la = None  # unusable — never let a non-finite time read as fresh LIVE
     freshness = None if la is None else max(0.0, now - la)
     if isinstance(la, (int, float)) and not isinstance(la, bool) and la > now:
         issues.append(

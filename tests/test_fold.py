@@ -1,6 +1,8 @@
 import json
+import sqlite3
 
 import pytest
+from runstate import open_channel
 from runstate.observables import Outcome, peek_terminal, progress
 
 from runstate_tui import status_fold
@@ -48,6 +50,32 @@ def test_guarded_degrades_a_malformed_record_to_a_malformed_issue(build_log):
     assert value is None
     assert issue.kind is IssueKind.MALFORMED and issue.severity is Severity.MEDIUM
     assert issue.seq == 1
+    assert issue.detail is not None and issue.detail.startswith("MalformedRecordError")
+
+
+def test_guarded_degrades_an_alien_non_dict_body_to_a_malformed_issue(tmp_path):
+    # A committed body that's valid JSON but not a dict (`42`) makes progress's
+    # body.get(...) raise AttributeError -- guarded widens to catch it as the same
+    # decodable-but-wrong-shape MALFORMED class as MalformedRecordError, NOT the
+    # byte-torn `corrupt` class (undecodable JSON, still propagates uncaught).
+    run_id = "alien"
+    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer.send({"step": 5, "consumed_seq": 0, "t": 1.0}, topic="lifecycle.heartbeat")
+    writer.close()
+    conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))
+    conn.execute("UPDATE log SET body = ? WHERE seq = ?", ("42", 1))
+    conn.commit()
+    conn.close()
+    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    try:
+        value, issue = guarded(progress, ch)
+        assert value is None
+        assert issue is not None
+        assert issue.kind is IssueKind.MALFORMED and issue.severity is Severity.MEDIUM
+        assert issue.seq is None  # AttributeError has no .seq
+        assert issue.detail is not None and issue.detail.startswith("AttributeError")
+    finally:
+        ch.close()
 
 
 def _env(now, **kw):
@@ -91,6 +119,41 @@ def test_reconcile_status_flags_skew_when_last_activity_is_in_the_future(build_l
     assert any(i.kind is IssueKind.SKEW_SUSPECTED for i in issues)
     assert freshness == 0.0  # max(0.0, now - la), never negative
     assert status.kind is StatusKind.LIVE
+
+
+def test_reconcile_status_nan_last_activity_is_pending_not_live(build_log):
+    # A NaN last_activity must NOT read as freshness=0.0 -> LIVE (the dangerous
+    # false-fresh case): guard it to pending with a loud HIGH malformed issue,
+    # retaining the raw value in `detail`.
+    ch = build_log(
+        [({"step": 1, "consumed_seq": 0, "t": float("nan")}, "lifecycle.heartbeat", None)]
+    )
+    status, freshness, issues = reconcile_status(ch, _env(100.0), now=100.0)
+    assert status.kind is StatusKind.PENDING
+    assert freshness is None
+    matches = [
+        i
+        for i in issues
+        if i.kind is IssueKind.MALFORMED
+        and i.severity is Severity.HIGH
+        and "not finite" in i.message
+    ]
+    assert len(matches) == 1
+    assert "nan" in matches[0].detail.lower()
+
+
+@pytest.mark.parametrize("t", [float("inf"), float("-inf")])
+def test_reconcile_status_infinite_last_activity_is_pending_not_live(build_log, t):
+    # +inf would otherwise read as freshness=0.0 -> LIVE and -inf as freshness=+inf
+    # -> STALE; both are silently wrong for a garbage clock -- both must land pending.
+    ch = build_log([({"step": 1, "consumed_seq": 0, "t": t}, "lifecycle.heartbeat", None)])
+    status, freshness, issues = reconcile_status(ch, _env(100.0), now=100.0)
+    assert status.kind is StatusKind.PENDING
+    assert freshness is None
+    assert any(
+        i.kind is IssueKind.MALFORMED and i.severity is Severity.HIGH and "not finite" in i.message
+        for i in issues
+    )
 
 
 def test_value_is_named_and_none_without_an_objective(build_log):
