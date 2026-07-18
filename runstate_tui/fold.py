@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
 import math
+import sqlite3
 from collections.abc import Callable
 from typing import TypeVar
 
 from runstate.channel import Channel
-from runstate.observables import MalformedRecordError, last_activity, peek_terminal, progress
+from runstate.observables import (
+    MalformedRecordError,
+    last_activity,
+    latest_episode,
+    live_demand,
+    peek_terminal,
+    progress,
+    undischarged_stops,
+)
 from runstate.vocabulary.payloads import Topic
 
 from .env import Env, Liveness, resolve_liveness
@@ -13,20 +23,43 @@ from .types import Issue, IssueKind, Row, Severity, Status
 
 T = TypeVar("T")
 
+_TORN_DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError)
+
+
+def locate_torn_seq(channel: Channel) -> int | None:
+    """Find the seq of the first record whose decode raises (append-only contiguity):
+    walk read(after=k, limit=1); a raising probe localizes the tear at k+1. Returns
+    None if no tear is found (the caller degrades to an unlocalized message)."""
+    k = 0
+    last = channel.last_seq()
+    while k < last:
+        try:
+            got = channel.read(after=k, limit=1)
+        except _TORN_DECODE_ERRORS:
+            return k + 1
+        if not got:
+            return None
+        k = got[0].seq
+    return None
+
 
 def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Issue | None]:
-    """Run a read; a MalformedRecordError (runstate's typed schema-invalid signal, e.g.
-    version skew) degrades to a MALFORMED issue so the run's other factors survive. A
-    byte-torn body (json.JSONDecodeError) and a substrate fault (sqlite3.DatabaseError)
-    are NOT caught here — the former propagates to crash (an atomicity violation), the
-    latter is caught at the open_and_fold boundary as `unreadable`."""
+    """A read that degrades a decodable-but-wrong-shape record to a MALFORMED issue so
+    the run's other factors survive: runstate's MalformedRecordError (schema-invalid), or
+    an AttributeError/TypeError from a non-dict body (`42`, `[1,2,3]`). The exact exception
+    is retained in `detail`. A byte-torn body (json.JSONDecodeError) is NOT caught here — it
+    propagates to open_and_fold as whole-run `corrupt` (undecodable substrate)."""
     try:
         return fn(channel), None
-    except MalformedRecordError as exc:
+    except (MalformedRecordError, AttributeError, TypeError) as exc:
         seq = getattr(exc, "seq", None)
-        message = f"record malformed at seq {seq}" if seq is not None else "record malformed"
+        loc = f" at seq {seq}" if seq is not None else ""
         return None, Issue(
-            kind=IssueKind.MALFORMED, severity=Severity.MEDIUM, message=message, seq=seq
+            kind=IssueKind.MALFORMED,
+            severity=Severity.MEDIUM,
+            message=f"record malformed{loc}",
+            seq=seq,
+            detail=f"{type(exc).__name__}: {exc}",
         )
 
 
@@ -41,6 +74,16 @@ def reconcile_status(
     la, la_issue = guarded(last_activity, channel)  # the ONE last_activity read
     if la_issue is not None:
         issues.append(la_issue)
+    if la is not None and not math.isfinite(la):
+        issues.append(
+            Issue(
+                kind=IssueKind.MALFORMED,
+                severity=Severity.HIGH,
+                message="activity timestamp is not finite (garbage clock)",
+                detail=f"last_activity={la!r}",
+            )
+        )
+        la = None  # unusable — never let a non-finite time read as fresh LIVE
     freshness = None if la is None else max(0.0, now - la)
     if isinstance(la, (int, float)) and not isinstance(la, bool) and la > now:
         issues.append(
@@ -70,14 +113,16 @@ def read_value(channel: Channel, objective: str | None) -> tuple[str, object, in
 
 
 def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
-    started, malformed_issue = guarded(
-        lambda ch: ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1), channel
-    )
+    def _started_t(ch: Channel) -> object:
+        started = ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1)
+        # alien non-dict body -> AttributeError here -> caught by guarded() below
+        return started[0].body.get("t") if started else None
+
+    t, malformed_issue = guarded(_started_t, channel)
     if malformed_issue is not None:
         return None, malformed_issue  # a malformed `started` never masquerades as "no started"
-    if not started:
+    if t is None:
         return None, None
-    t = started[0].body.get("t")
     if not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t):
         return None, None
     if t > now:
@@ -109,12 +154,31 @@ def status_fold(channel: Channel, env: Env) -> Row:
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
+    def _episode_handle(ch: Channel) -> str | None:
+        started_env = latest_episode(ch)
+        # alien non-dict body -> AttributeError here -> caught by guarded() below
+        return started_env.body.get("handle") if started_env is not None else None
+
+    episode, episode_issue = guarded(_episode_handle, channel)
+    if episode_issue is not None:
+        issues.append(episode_issue)
+
+    stops, stops_issue = guarded(undischarged_stops, channel)
+    if stops_issue is not None:
+        issues.append(stops_issue)
+
+    demand, demand_issue = guarded(live_demand, channel)
+    if demand_issue is not None:
+        issues.append(demand_issue)
+
     return Row(
         status=status,
         frontier=frontier,
         freshness=freshness,
         value=value,
         elapsed=elapsed,
-        episode=None,
+        episode=episode,
+        undischarged_stops=tuple(stops or ()),
+        live_demand=tuple(demand or ()),
         issues=tuple(issues),
     )

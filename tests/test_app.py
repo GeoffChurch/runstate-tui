@@ -2,14 +2,13 @@ import asyncio
 import threading
 import time
 
-import pytest
 from runstate import open_channel
 from textual.widgets import Static
-from textual.worker import WorkerFailed
 
 from runstate_tui.app import SingleRunApp
 from runstate_tui.confirm import ConfirmStopScreen
 from runstate_tui.control import StopOutcome, StopResult
+from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
 
 
@@ -51,9 +50,7 @@ async def _reschedules(tmp_path):
         assert "live" in content  # still rendering correctly after many ticks
 
 
-def test_byte_torn_crashes_the_cockpit(tmp_path):
-    # a byte-torn record is an atomicity violation: the fold worker must crash the
-    # cockpit (WorkerFailed), never self-heal it into a silent retry.
+def test_byte_torn_renders_corrupt_not_crash(tmp_path):
     import sqlite3
 
     ch = open_channel("r", root=tmp_path, backend="sqlite")
@@ -63,18 +60,60 @@ def test_byte_torn_crashes_the_cockpit(tmp_path):
     conn.execute("UPDATE log SET body = ? WHERE seq = 1", ("{not json",))
     conn.commit()
     conn.close()
-
-    ref = ("r", str(tmp_path), "sqlite")
-    with pytest.raises(WorkerFailed):
-        asyncio.run(_crash(ref))
+    asyncio.run(_shows_corrupt(("r", str(tmp_path), "sqlite")))
 
 
-async def _crash(ref):
+async def _shows_corrupt(ref):
     app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()
         await pilot.pause(0.05)
+        assert "corrupt" in str(app.query_one("#run", Static).content)  # loud, no crash
+
+
+def test_alien_started_renders_malformed_not_crash(tmp_path):
+    import sqlite3
+
+    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
+    ch.close()
+    conn = sqlite3.connect(str(tmp_path / "r.db"))
+    conn.execute("UPDATE log SET body = ? WHERE seq = 1", ("42",))  # valid JSON, non-dict
+    conn.commit()
+    conn.close()
+    asyncio.run(_shows_no_crash(("r", str(tmp_path), "sqlite")))
+
+
+async def _shows_no_crash(ref):
+    # the app-level regression for the alien-started crash: `read_elapsed`'s
+    # `.body.get("t")` used to run OUTSIDE guarded(), so this AttributeError escaped
+    # open_and_fold entirely and crashed the fail-fast worker (and the whole cockpit).
+    # Fixed, the fold worker completes and renders a Row -- no crash, and this is NOT
+    # the byte-torn `corrupt` class since the body decoded fine.
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.05)
+        content = str(app.query_one("#run", Static).content)
+        assert "corrupt" not in content
+
+
+def test_enter_opens_the_drilldown(tmp_path):
+    asyncio.run(_opens_drilldown(tmp_path))
+
+
+async def _opens_drilldown(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DrillDownScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, DrillDownScreen)  # returns to the main view
 
 
 class _RecordingDispatch:

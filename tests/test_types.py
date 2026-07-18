@@ -50,6 +50,13 @@ def test_status_severity_map():
     assert Status.terminal(Outcome.COMPLETED).severity is Severity.OK
 
 
+def test_corrupt_status_is_loud_not_reused_unreadable():
+    s = Status.corrupt()
+    assert s.kind is StatusKind.CORRUPT
+    assert s.label == "corrupt"
+    assert s.severity is Severity.HIGH
+
+
 def _bare_row(**kw):
     base = dict(
         status=Status.live(),
@@ -58,6 +65,8 @@ def _bare_row(**kw):
         value=None,
         elapsed=5.0,
         episode=None,
+        undischarged_stops=(),
+        live_demand=(),
         issues=(),
     )
     base.update(kw)

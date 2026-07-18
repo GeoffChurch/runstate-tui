@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
+from runstate.channel import Envelope
 from runstate.observables import Outcome
 
 
@@ -19,6 +20,7 @@ class IssueKind(Enum):
     MALFORMED = "malformed"
     SKEW_SUSPECTED = "skew_suspected"
     UNSAFE_STOP = "unsafe_stop"
+    CORRUPT = "corrupt"
 
 
 @dataclass(frozen=True)
@@ -49,10 +51,12 @@ class StatusKind(Enum):
     MISSING = "missing"
     UNREADABLE = "unreadable"
     CONFLICTED = "conflicted"
+    CORRUPT = "corrupt"
 
 
 _STATUS_SEVERITY = {
     StatusKind.UNREADABLE: Severity.HIGH,
+    StatusKind.CORRUPT: Severity.HIGH,
     StatusKind.CONFLICTED: Severity.MEDIUM,
     StatusKind.PENDING: Severity.INFO,
     StatusKind.MISSING: Severity.INFO,
@@ -89,6 +93,10 @@ class Status:
         return cls(StatusKind.CONFLICTED)
 
     @classmethod
+    def corrupt(cls) -> Status:
+        return cls(StatusKind.CORRUPT)
+
+    @classmethod
     def terminal(cls, outcome: Outcome) -> Status:
         return cls(StatusKind.TERMINAL, outcome)
 
@@ -113,6 +121,8 @@ class Row:
     value: tuple[str, object, int | None] | None  # (name, scalar, step)
     elapsed: float | None  # now - first started.t; None if no started
     episode: str | None  # latest_episode handle (PURE); None in Stage 0
+    undischarged_stops: tuple[Envelope, ...]
+    live_demand: tuple[Envelope, ...]
     issues: tuple[Issue, ...]
 
     @property
