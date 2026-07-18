@@ -39,3 +39,9 @@ Six parallel subagents (lifecycle / integrity / time-clocks / episodes-ordering 
 ## Also noted
 - Several current byte-torn tests (`test_*_lets_byte_torn_propagate`, `test_byte_torn_crashes_the_cockpit`) encode the *old crash contract* → replaced (not kept) by the corrupt reshape, per no-legacy-compat.
 - Fixture landmine: `lifecycle.stopped`/`launcher.terminated` are verdict-plane topics (need valid schema/request_id) — a bare body trips an incidental MALFORMED issue. Use `launcher.launched` as the "safe extra dated topic" for time-only fixtures.
+
+## Coverage delivered (2026-07-18)
+
+Built: 11 helpers + ~50 curated scenarios across fold/control/log planes (143→149 tests). Every deferred-finding is locked-at-current-behavior with a `# FINDING:` comment. The final review confirmed **no bug-locking/vacuous scenarios** (one vacuous helper self-test was repaired). Sharp ★ scenarios the first pass over-narrowed were added back: reqid-absent, both-future-skew, clock-moves-backward, malformed-value-tolerated, error-empty-errored, pop-mid-tick (covers detail.py's teardown guard).
+
+**Still deferred (marginal ★, documented not dropped):** `long-line-no-wrap`, `both-header-and-tail-identical` (header/tail share `format_envelope` — guaranteed today, unpinned), `corrupt+malformed-together` (ordering: peek_terminal malformed then a torn read → corrupt; the more-severe wins). Add on demand.
