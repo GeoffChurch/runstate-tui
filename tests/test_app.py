@@ -1,9 +1,12 @@
 import asyncio
+import threading
 
 from runstate import open_channel
 from textual.widgets import Static
 
 from runstate_tui.app import SingleRunApp
+from runstate_tui.confirm import ConfirmStopScreen
+from runstate_tui.control import StopOutcome, StopResult
 from runstate_tui.env import Env
 
 
@@ -71,3 +74,127 @@ async def _recovers(tmp_path, monkeypatch):
         assert calls["n"] >= 2  # it kept ticking after the error
         assert not app._exit  # the app did not crash/exit
         assert "live" in content  # recovered and rendered the run
+
+
+class _RecordingDispatch:
+    """A fake stop_dispatch that records its call and returns a chosen outcome.
+    Runs on the app's dedicated stop thread, so guard the record with a lock."""
+
+    def __init__(self, outcome: StopOutcome) -> None:
+        self._outcome = outcome
+        self._lock = threading.Lock()
+        self.calls: list[tuple[object, str, float]] = []
+
+    def __call__(self, ref, request_id: str, timeout: float) -> StopOutcome:
+        with self._lock:
+            self.calls.append((ref, request_id, timeout))
+        return self._outcome
+
+
+def test_pressing_s_opens_the_confirm_gate(tmp_path):
+    asyncio.run(_opens_gate(tmp_path))
+
+
+async def _opens_gate(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmStopScreen)
+
+
+def test_confirming_dispatches_a_webui_stop_and_shows_the_outcome(tmp_path):
+    asyncio.run(_confirms(tmp_path))
+
+
+async def _confirms(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    fake = _RecordingDispatch(StopOutcome(StopResult.ACCEPTED, "webui:x"))
+    app = SingleRunApp(
+        ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_timeout=3.0, stop_dispatch=fake
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(50):
+            await pilot.pause(0.01)
+            if fake.calls:
+                break
+        await pilot.pause(0.05)
+        assert len(fake.calls) == 1
+        called_ref, request_id, timeout = fake.calls[0]
+        assert called_ref == ref
+        assert request_id.startswith("webui:")
+        assert timeout == 3.0
+        assert str(app.query_one("#stop", Static).content) == "✓ stop accepted"
+
+
+def test_declining_the_gate_dispatches_nothing(tmp_path):
+    asyncio.run(_declines(tmp_path))
+
+
+async def _declines(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    fake = _RecordingDispatch(StopOutcome(StopResult.ACCEPTED, "webui:x"))
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=fake)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause(0.1)
+        assert fake.calls == []
+        assert str(app.query_one("#stop", Static).content) == ""
+
+
+def test_unsafe_outcome_is_shown_high(tmp_path):
+    asyncio.run(_unsafe(tmp_path))
+
+
+async def _unsafe(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    fake = _RecordingDispatch(StopOutcome(StopResult.UNSAFE, "webui:x", "no live worker?"))
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=fake)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(50):
+            await pilot.pause(0.01)
+            if fake.calls:
+                break
+        await pilot.pause(0.05)
+        assert "⚠ unsafe stop" in str(app.query_one("#stop", Static).content)
+
+
+def test_stop_completes_while_the_fold_is_slow(tmp_path, monkeypatch):
+    # the dedicated-thread proof: a slow fold must not delay the stop outcome.
+    asyncio.run(_slow_fold_stop(tmp_path, monkeypatch))
+
+
+async def _slow_fold_stop(tmp_path, monkeypatch):
+    import time as _time
+
+    import runstate_tui.app as appmod
+
+    ref = _live_sqlite_run(tmp_path)
+    real = appmod.render_single
+
+    def slow(r, e):
+        _time.sleep(0.4)  # a slow (not wedged) fold on the fold worker
+        return real(r, e)
+
+    monkeypatch.setattr(appmod, "render_single", slow)
+    fake = _RecordingDispatch(StopOutcome(StopResult.ACCEPTED, "webui:x"))
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=fake)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        # the stop must land well before a 0.4s fold would; poll briefly
+        for _ in range(20):
+            await pilot.pause(0.01)
+            if fake.calls:
+                break
+        assert fake.calls, "stop did not run while the fold was slow (thread not dedicated?)"
