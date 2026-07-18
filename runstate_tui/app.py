@@ -26,7 +26,10 @@ class SingleRunApp(App[None]):
     """The single-run cockpit: folds one run OFF the render thread at ~1 Hz and
     shows its Row (see `_fold`). It also carries the one effectful arrow — a
     confirm-gated `stop` (spec §6.2) run on a DEDICATED thread (spec §13) so a
-    data-plane stall can never starve the stop key."""
+    data-plane stall can never starve the stop key. `_fold` is fail-fast: the
+    fold yields a Row for every legitimate condition, so an escaping exception
+    (byte-torn, or a genuine bug) crashes the cockpit rather than self-healing
+    into a silent retry (§10 — a crash is not a freeze)."""
 
     BINDINGS = [("s", "stop", "Stop run")]
 
@@ -59,15 +62,16 @@ class SingleRunApp(App[None]):
     def _show(self, text: str) -> None:
         self.query_one("#run", Static).update(text)
 
-    @work(thread=True, exclusive=True, exit_on_error=False)
+    @work(thread=True, exclusive=True)
     def _fold(self) -> None:
-        try:
-            row = render_single(self._ref, self._env)  # blocking fold, off the render thread
-            text = format_row(row)
-            self.call_from_thread(self._show, text)  # query + update via call_from_thread
-        finally:
-            # always reschedule, even on an unanticipated fold error (§3/§10).
-            self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
+        # fail-fast: the fold yields a Row for every legitimate condition, so an
+        # escaping exception (byte-torn = a runstate atomicity violation, or a genuine
+        # bug) crashes the cockpit rather than self-healing into a silent retry. A
+        # crash is not a freeze — the app exits (§10 holds).
+        row = render_single(self._ref, self._env)  # byte-torn -> raises -> crash
+        text = format_row(row)
+        self.call_from_thread(self._show, text)  # query + update via call_from_thread
+        self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
 
     # ---- stop: the one effectful arrow (spec §6.2, §13) -----------------
     def action_stop(self) -> None:

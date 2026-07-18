@@ -2,8 +2,10 @@ import asyncio
 import threading
 import time
 
+import pytest
 from runstate import open_channel
 from textual.widgets import Static
+from textual.worker import WorkerFailed
 
 from runstate_tui.app import SingleRunApp
 from runstate_tui.confirm import ConfirmStopScreen
@@ -49,32 +51,30 @@ async def _reschedules(tmp_path):
         assert "live" in content  # still rendering correctly after many ticks
 
 
-def test_fold_error_does_not_crash_and_loop_recovers(tmp_path, monkeypatch):
-    asyncio.run(_recovers(tmp_path, monkeypatch))
+def test_byte_torn_crashes_the_cockpit(tmp_path):
+    # a byte-torn record is an atomicity violation: the fold worker must crash the
+    # cockpit (WorkerFailed), never self-heal it into a silent retry.
+    import sqlite3
+
+    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
+    ch.close()
+    conn = sqlite3.connect(str(tmp_path / "r.db"))
+    conn.execute("UPDATE log SET body = ? WHERE seq = 1", ("{not json",))
+    conn.commit()
+    conn.close()
+
+    ref = ("r", str(tmp_path), "sqlite")
+    with pytest.raises(WorkerFailed):
+        asyncio.run(_crash(ref))
 
 
-async def _recovers(tmp_path, monkeypatch):
-    import runstate_tui.app as appmod
-
-    ref = _live_sqlite_run(tmp_path)
-    real = appmod.render_single
-    calls = {"n": 0}
-
-    def flaky(r, e):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("boom")  # unanticipated fold error on the first tick
-        return real(r, e)
-
-    monkeypatch.setattr(appmod, "render_single", flaky)
-    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=0.05)
+async def _crash(ref):
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
     async with app.run_test() as pilot:
-        await pilot.pause(0.3)  # let the failed tick + a recovery tick run
+        await pilot.pause()
         await app.workers.wait_for_complete()
-        content = str(app.query_one("#run", Static).content)
-        assert calls["n"] >= 2  # it kept ticking after the error
-        assert not app._exit  # the app did not crash/exit
-        assert "live" in content  # recovered and rendered the run
+        await pilot.pause(0.05)
 
 
 class _RecordingDispatch:
