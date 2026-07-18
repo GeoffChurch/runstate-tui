@@ -1,4 +1,3 @@
-import json
 import os
 import sqlite3
 from pathlib import Path
@@ -9,7 +8,7 @@ from runstate import open_channel
 from runstate_tui.env import Env
 from runstate_tui.resolver import const_resolver
 from runstate_tui.table import open_and_fold, render_single, render_table
-from runstate_tui.types import StatusKind
+from runstate_tui.types import IssueKind, Severity, StatusKind
 
 
 def _env(now=150.0, **kw):
@@ -114,13 +113,15 @@ def test_open_and_fold_maps_a_substrate_read_fault_to_unreadable(tmp_path, monke
     assert row.status.kind is StatusKind.UNREADABLE
 
 
-def test_open_and_fold_lets_byte_torn_propagate(torn_sqlite_channel, tmp_path):
-    # byte-torn is NOT unreadable — it crashes. Build a torn run and fold its ref.
+def test_open_and_fold_maps_byte_torn_to_corrupt(torn_sqlite_channel, tmp_path):
+    # byte-torn is NOT unreadable and NOT a crash — it's a distinct, loud `corrupt`
+    # status carrying the torn seq.
     torn_sqlite_channel([({"handle": "h", "t": 1.0}, "lifecycle.started", None)], torn_seq=1)
     # torn_sqlite_channel writes run_id "torn" under tmp_path
-    ref = ("torn", str(tmp_path), "sqlite")
-    with pytest.raises(json.JSONDecodeError):
-        open_and_fold(ref, Env(clock=lambda: 1.0))
+    row = open_and_fold(("torn", str(tmp_path), "sqlite"), Env(clock=lambda: 1.0))
+    assert row.status.kind is StatusKind.CORRUPT
+    assert row.status.severity is Severity.HIGH
+    assert any(i.kind is IssueKind.CORRUPT and i.seq == 1 for i in row.issues)
 
 
 def test_read_log_delta_is_incremental(tmp_path):
@@ -168,11 +169,10 @@ def test_read_log_delta_maps_a_substrate_read_fault_to_empty(tmp_path, monkeypat
     assert read_log_delta(("sub", str(tmp_path), "sqlite"), after=0) == []
 
 
-def test_read_log_delta_lets_byte_torn_propagate(torn_sqlite_channel, tmp_path):
-    # byte-torn is NOT a substrate fault -> it crashes, same as open_and_fold.
+def test_read_log_delta_byte_torn_is_empty(torn_sqlite_channel, tmp_path):
+    # byte-torn is no longer a crash; the drill-down header surfaces `corrupt` via
+    # render_single, so the raw tail degrades to empty (like the other read faults).
     torn_sqlite_channel([({"handle": "h", "t": 1.0}, "lifecycle.started", None)], torn_seq=1)
     from runstate_tui.table import read_log_delta
 
-    ref = ("torn", str(tmp_path), "sqlite")
-    with pytest.raises(json.JSONDecodeError):
-        read_log_delta(ref, after=0)
+    assert read_log_delta(("torn", str(tmp_path), "sqlite"), after=0) == []

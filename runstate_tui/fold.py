@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+import sqlite3
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -20,6 +22,25 @@ from .env import Env, Liveness, resolve_liveness
 from .types import Issue, IssueKind, Row, Severity, Status
 
 T = TypeVar("T")
+
+_TORN_DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError)
+
+
+def locate_torn_seq(channel: Channel) -> int | None:
+    """Find the seq of the first record whose decode raises (append-only contiguity):
+    walk read(after=k, limit=1); a raising probe localizes the tear at k+1. Returns
+    None if no tear is found (the caller degrades to an unlocalized message)."""
+    k = 0
+    last = channel.last_seq()
+    while k < last:
+        try:
+            got = channel.read(after=k, limit=1)
+        except _TORN_DECODE_ERRORS:
+            return k + 1
+        if not got:
+            return None
+        k = got[0].seq
+    return None
 
 
 def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Issue | None]:

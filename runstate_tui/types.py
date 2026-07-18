@@ -20,6 +20,7 @@ class IssueKind(Enum):
     MALFORMED = "malformed"
     SKEW_SUSPECTED = "skew_suspected"
     UNSAFE_STOP = "unsafe_stop"
+    CORRUPT = "corrupt"
 
 
 @dataclass(frozen=True)
@@ -50,10 +51,12 @@ class StatusKind(Enum):
     MISSING = "missing"
     UNREADABLE = "unreadable"
     CONFLICTED = "conflicted"
+    CORRUPT = "corrupt"
 
 
 _STATUS_SEVERITY = {
     StatusKind.UNREADABLE: Severity.HIGH,
+    StatusKind.CORRUPT: Severity.HIGH,
     StatusKind.CONFLICTED: Severity.MEDIUM,
     StatusKind.PENDING: Severity.INFO,
     StatusKind.MISSING: Severity.INFO,
@@ -88,6 +91,10 @@ class Status:
     @classmethod
     def conflicted(cls) -> Status:
         return cls(StatusKind.CONFLICTED)
+
+    @classmethod
+    def corrupt(cls) -> Status:
+        return cls(StatusKind.CORRUPT)
 
     @classmethod
     def terminal(cls, outcome: Outcome) -> Status:

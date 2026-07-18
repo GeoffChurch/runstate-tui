@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -7,9 +8,9 @@ from runstate import open_channel
 from runstate.channel import Envelope
 
 from .env import Env
-from .fold import status_fold
+from .fold import locate_torn_seq, status_fold
 from .resolver import Resolver, RunRef, const_resolver
-from .types import Row, Status
+from .types import Issue, IssueKind, Row, Severity, Status
 
 _OPEN_ERRORS = (sqlite3.DatabaseError, sqlite3.OperationalError, PermissionError, OSError)
 
@@ -26,6 +27,24 @@ def _bare(status: Status) -> Row:
         undischarged_stops=(),
         live_demand=(),
         issues=(),
+    )
+
+
+def _corrupt(seq: int | None) -> Row:
+    """A row for a byte-torn log: a distinct, loud `corrupt` status (HIGH) carrying
+    the torn seq — NOT a crash, and NOT reused `unreadable` (that would be lossy)."""
+    msg = f"log corrupt at seq {seq}" if seq is not None else "log corrupt"
+    issue = Issue(kind=IssueKind.CORRUPT, severity=Severity.HIGH, message=msg, seq=seq)
+    return Row(
+        status=Status.corrupt(),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(),
+        live_demand=(),
+        issues=(issue,),
     )
 
 
@@ -48,17 +67,23 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
         return _bare(Status.unreadable())  # corrupt/foreign/unopenable db
     try:
         return status_fold(channel, env)
+    except json.JSONDecodeError:
+        # byte-torn (an atomicity violation): NOT unreadable (that would be lossy) and
+        # NOT a crash — a distinct, loud `corrupt` status carrying the located seq.
+        return _corrupt(locate_torn_seq(channel))
     except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
         return _bare(Status.unreadable())  # substrate fault mid-read (a corrupt db
-        # fails every read; byte-torn's json.JSONDecodeError is NOT caught -> it crashes)
+        # fails every read); json.JSONDecodeError is caught above, not here — it is
+        # not a subclass of sqlite3.DatabaseError/OSError, so order is for clarity.
     finally:
         channel.close()
 
 
 def read_log_delta(ref: RunRef, after: int, *, limit: int | None = None) -> list[Envelope]:
     """The raw log tail as a query: envelopes with seq > `after`. Filter-shaped for
-    later (topics/name/request_ids). Missing/unreadable/substrate-fault -> [] (the
-    header carries the run's status); a byte-torn record -> json.JSONDecodeError -> crash."""
+    later (topics/name/request_ids). Missing/unreadable/substrate-fault/byte-torn -> []
+    (the header carries the run's status, including the loud `corrupt` verdict, via
+    render_single/open_and_fold)."""
     run_id, root, backend = ref
     if backend == "sqlite":
         try:
@@ -71,8 +96,12 @@ def read_log_delta(ref: RunRef, after: int, *, limit: int | None = None) -> list
         return []
     try:
         return channel.read(after=after, limit=limit)
-    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
-        return []  # substrate fault mid-read (byte-torn's JSONDecodeError is NOT caught -> crash)
+    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError, json.JSONDecodeError):
+        # substrate fault or byte-torn mid-read -> []. TODO(follow-up): a byte-torn
+        # tail could instead raw-passthrough everything up to the tear rather than
+        # dropping the whole delta — deferred; the header's `corrupt` status is the
+        # loud signal for now.
+        return []
     finally:
         channel.close()
 

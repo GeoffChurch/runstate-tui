@@ -26,6 +26,19 @@ def test_guarded_lets_byte_torn_propagate(torn_sqlite_channel):
         guarded(progress, ch)
 
 
+def test_locate_torn_seq_finds_the_tear(torn_sqlite_channel):
+    from runstate_tui.fold import locate_torn_seq
+
+    ch = torn_sqlite_channel(
+        [
+            ({"handle": "h", "t": 1.0}, "lifecycle.started", None),
+            ({"step": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
+        ],
+        torn_seq=2,
+    )
+    assert locate_torn_seq(ch) == 2
+
+
 def test_guarded_degrades_a_malformed_record_to_a_malformed_issue(build_log):
     # valid JSON, invalid Stopped schema (missing error/final_step/t) -> peek_terminal
     # raises MalformedRecordError (runstate's typed, deliberately-propagated signal);
