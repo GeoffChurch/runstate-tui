@@ -121,3 +121,58 @@ def test_open_and_fold_lets_byte_torn_propagate(torn_sqlite_channel, tmp_path):
     ref = ("torn", str(tmp_path), "sqlite")
     with pytest.raises(json.JSONDecodeError):
         open_and_fold(ref, Env(clock=lambda: 1.0))
+
+
+def test_read_log_delta_is_incremental(tmp_path):
+    from runstate_tui.table import read_log_delta
+
+    ch = open_channel("d", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")  # seq 1
+    ch.send({"step": 1, "consumed_seq": 0, "t": 2.0}, topic="lifecycle.heartbeat")  # seq 2
+    ch.close()
+    ref = ("d", str(tmp_path), "sqlite")
+
+    all_ = read_log_delta(ref, after=0)
+    assert [e.seq for e in all_] == [1, 2]
+    assert read_log_delta(ref, after=1)[0].seq == 2  # only the delta
+    assert read_log_delta(ref, after=2) == []  # nothing new
+
+
+def test_read_log_delta_missing_run_is_empty(tmp_path):
+    from runstate_tui.table import read_log_delta
+
+    assert read_log_delta(("ghost", str(tmp_path), "sqlite"), after=0) == []
+    assert not (tmp_path / "ghost.db").exists()  # no phantom fabricated
+
+
+def test_read_log_delta_corrupt_db_is_empty(tmp_path):
+    from runstate_tui.table import read_log_delta
+
+    (Path(tmp_path) / "corrupt.db").write_bytes(b"this is not a sqlite database")
+    assert read_log_delta(("corrupt", str(tmp_path), "sqlite"), after=0) == []
+
+
+def test_read_log_delta_maps_a_substrate_read_fault_to_empty(tmp_path, monkeypatch):
+    from runstate.channel.sqlite import SqliteChannel
+
+    from runstate_tui.table import read_log_delta
+
+    ch = open_channel("sub", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    ch.close()
+
+    def boom(self, *a, **kw):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(SqliteChannel, "read", boom)
+    assert read_log_delta(("sub", str(tmp_path), "sqlite"), after=0) == []
+
+
+def test_read_log_delta_lets_byte_torn_propagate(torn_sqlite_channel, tmp_path):
+    # byte-torn is NOT a substrate fault -> it crashes, same as open_and_fold.
+    torn_sqlite_channel([({"handle": "h", "t": 1.0}, "lifecycle.started", None)], torn_seq=1)
+    from runstate_tui.table import read_log_delta
+
+    ref = ("torn", str(tmp_path), "sqlite")
+    with pytest.raises(json.JSONDecodeError):
+        read_log_delta(ref, after=0)
