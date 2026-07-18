@@ -10,10 +10,16 @@ def test_severity_orders_and_maxes():
 
 def test_issue_is_a_frozen_value():
     a = Issue(
-        kind=IssueKind.TORN, severity=Severity.MEDIUM, message="log torn at seq 4012", seq=4012
+        kind=IssueKind.MALFORMED,
+        severity=Severity.MEDIUM,
+        message="record malformed at seq 4012",
+        seq=4012,
     )
     b = Issue(
-        kind=IssueKind.TORN, severity=Severity.MEDIUM, message="log torn at seq 4012", seq=4012
+        kind=IssueKind.MALFORMED,
+        severity=Severity.MEDIUM,
+        message="record malformed at seq 4012",
+        seq=4012,
     )
     assert a == b
     assert a.detail is None
@@ -63,7 +69,7 @@ def test_row_is_a_frozen_value_for_the_singleton_test():
 
 
 def test_row_severity_is_max_of_status_and_issues():
-    torn = Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message="torn")
+    torn = Issue(kind=IssueKind.MALFORMED, severity=Severity.MEDIUM, message="torn")
     assert _bare_row().severity is Severity.OK
     assert _bare_row(issues=(torn,)).severity is Severity.MEDIUM
     assert _bare_row(status=Status.unreadable()).severity is Severity.HIGH
