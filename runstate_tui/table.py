@@ -7,7 +7,7 @@ from runstate import open_channel
 
 from .env import Env
 from .fold import status_fold
-from .resolver import RunRef
+from .resolver import Resolver, RunRef, const_resolver
 from .types import Row, Status
 
 _OPEN_ERRORS = (sqlite3.DatabaseError, sqlite3.OperationalError, PermissionError, OSError)
@@ -40,3 +40,12 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
         return status_fold(channel, env)
     finally:
         channel.close()
+
+
+def render_table(resolver: Resolver, env: Env) -> list[Row]:
+    return [open_and_fold(ref, env) for ref in resolver(env.clock())]
+
+
+def render_single(ref: RunRef, env: Env) -> Row:
+    # the single-run view IS the table at |I|=1 — one code path, no bespoke screen (spec §11)
+    return render_table(const_resolver(ref), env)[0]
