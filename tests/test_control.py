@@ -144,8 +144,18 @@ def test_stop_run_byte_torn_terminal_propagates(tmp_path):
     corrupt_seq(tmp_path, "byte-torn-terminal", seq)
     ch = _run(tmp_path, "byte-torn-terminal")
     try:
+        before = len(ch.read(topics=[Topic.CONTROL_STOP]))
         with pytest.raises(json.JSONDecodeError):
             stop_run(ch, request_id="webui:torn", timeout=1.0, sleep=lambda _s: None)
+        # Pin that the crash fires BEFORE any control.stop is written -- not just
+        # that SOME JSONDecodeError eventually surfaces. Without this, a future
+        # widening of _already_ended's `except MalformedRecordError` to `except
+        # Exception` would swallow the byte-torn, proceed to channel.send (durably
+        # writing a pointless control.stop into the corrupt log), and only THEN
+        # crash in await_consumed -- still satisfying pytest.raises(...) by
+        # accident, undetected.
+        after = len(ch.read(topics=[Topic.CONTROL_STOP]))
+        assert after == before == 0  # no control.stop was ever appended
     finally:
         ch.close()
 

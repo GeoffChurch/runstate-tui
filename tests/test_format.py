@@ -90,6 +90,32 @@ def test_format_envelope_is_a_compact_one_liner():
     assert "4" in line and "control.stop" in line and "webui:x" in line
 
 
+def test_format_envelope_escapes_embedded_newline_in_request_id():
+    # A corrupted/adversarial request_id containing raw control chars must NOT
+    # split one envelope across multiple RichLog lines (invariant #6) -- the
+    # whole assembled line is escaped, not just body, so request_id is covered.
+    from runstate.channel import Envelope
+
+    from runstate_tui.format import format_envelope
+
+    e = Envelope(seq=4, topic="control.stop", name=None, request_id="webui:evil\nline2", body={})
+    line = format_envelope(e)
+    assert "\n" not in line
+    assert "webui:evil\\nline2" in line
+
+
+def test_format_envelope_normal_dict_body_unchanged():
+    # A normal dict body renders exactly as before -- the final whole-line
+    # escape must not introduce spurious escaping for the common case.
+    from runstate.channel import Envelope
+
+    from runstate_tui.format import format_envelope
+
+    e = Envelope(seq=4, topic="control.stop", name=None, request_id="webui:x", body={"a": 1})
+    line = format_envelope(e)
+    assert line == "    4  control.stop          webui:x  {'a': 1}"
+
+
 def test_format_detail_shows_all_factors_and_lists():
     from runstate.channel import Envelope
 
