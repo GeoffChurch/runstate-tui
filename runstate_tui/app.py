@@ -31,10 +31,12 @@ class SingleRunApp(App[None]):
     def _tick(self) -> None:
         self._fold()
 
+    def _show(self, text: str) -> None:
+        self.query_one("#run", Static).update(text)
+
     @work(thread=True, exclusive=True)
     def _fold(self) -> None:
         row = render_single(self._ref, self._env)  # blocking fold, off the render thread
         text = format_row(row)
-        display = self.query_one("#run", Static)
-        self.call_from_thread(display.update, text)  # widget touch must go via call_from_thread
+        self.call_from_thread(self._show, text)  # query + update both go via call_from_thread
         self.call_from_thread(self.set_timer, self._tick_interval, self._tick)

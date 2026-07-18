@@ -29,3 +29,17 @@ async def _render(tmp_path):
         content = str(app.query_one("#run", Static).content)
         assert "live" in content
         assert "step 7" in content
+
+
+def test_ticks_reschedule_without_pile_up(tmp_path):
+    asyncio.run(_reschedules(tmp_path))
+
+
+async def _reschedules(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=0.05)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)  # let several ticks elapse in real time
+        await app.workers.wait_for_complete()
+        content = str(app.query_one("#run", Static).content)
+        assert "live" in content  # still rendering correctly after many ticks
