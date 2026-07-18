@@ -264,14 +264,23 @@ async def _in_flight_guard(tmp_path):
 
 
 def test_quitting_mid_stop_does_not_raise_on_the_stop_thread(tmp_path):
-    asyncio.run(_quit_mid_stop(tmp_path))
+    errors: list[str] = []
+    old_hook = threading.excepthook
+    # install the capturing hook OUTSIDE asyncio.run so it stays live through the
+    # loop's teardown — that is WHEN the mid-stop call_from_thread actually fails.
+    threading.excepthook = lambda a: errors.append(a.exc_type.__name__)
+    try:
+        asyncio.run(_quit_mid_stop(tmp_path))
+        time.sleep(0.2)  # let any teardown exception on the stop thread fire
+    finally:
+        threading.excepthook = old_hook
+    assert errors == [], f"stop thread raised at teardown: {errors}"
 
 
 async def _quit_mid_stop(tmp_path):
     ref = _live_sqlite_run(tmp_path)
     release = threading.Event()
     entered = threading.Event()
-    errors: list[str] = []
 
     def blocking(r, request_id, timeout):
         entered.set()
@@ -279,23 +288,12 @@ async def _quit_mid_stop(tmp_path):
         return StopOutcome(StopResult.ACCEPTED, request_id)
 
     app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=blocking)
-    old_hook = threading.excepthook
-    threading.excepthook = lambda a: errors.append(a.exc_type.__name__)
-    try:
-        async with app.run_test() as pilot:
-            await pilot.press("s")
-            await pilot.pause()
-            await pilot.press("y")
-            for _ in range(200):
-                await pilot.pause(0.01)
-                if entered.is_set():
-                    break
-        # the app has torn down (loop closed) while the stop is still in-flight
-        release.set()  # dispatch returns -> finally marshals onto the dead loop
-        for _ in range(300):  # wait (bounded) for the stop thread to run its finally + exit
-            if not any(t.name == "stop-handshake" for t in threading.enumerate()):
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(200):
+            await pilot.pause(0.01)
+            if entered.is_set():
                 break
-            time.sleep(0.01)
-    finally:
-        threading.excepthook = old_hook
-    assert errors == [], f"stop thread raised at teardown: {errors}"
+    release.set()  # let the in-flight dispatch return -> finally marshals onto the dying loop

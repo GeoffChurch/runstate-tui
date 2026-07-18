@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import concurrent.futures
 import threading
 import uuid
 from collections.abc import Callable
@@ -105,9 +104,12 @@ class SingleRunApp(App[None]):
         finally:
             try:
                 self.call_from_thread(self._finish_stop, outcome)
-            except (RuntimeError, concurrent.futures.CancelledError):
-                # the app is tearing down (loop closed / callback cancelled) while a
-                # stop was in-flight: it was already SENT; drop the result-marshal
+            except Exception:
+                # best-effort teardown marshal: if the app is tearing down while a
+                # stop was in-flight, the result-update can fail three ways depending
+                # on timing — loop closed (RuntimeError), callback cancelled
+                # (concurrent.futures.CancelledError), or the #stop widget already
+                # unmounted (textual NoMatches). The stop was already SENT; suppress
                 # rather than crash the daemon thread with a teardown traceback.
                 pass
 
