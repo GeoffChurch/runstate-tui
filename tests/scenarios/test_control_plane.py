@@ -94,9 +94,13 @@ def test_conditional_vs_immediate_pending_not_due(build_log):
 
 
 def test_undischarged_stop_spans_episode(build_log):
-    # FINDING: ghost-stop-badge -- undischarged_stops is NOT episode-scoped. A
-    # stop filed against the FIRST episode, never discharged by a stopped, still
-    # shows up as pending on a fresh, unrelated, live SECOND episode.
+    # The raw observable itself is NOT episode-scoped (out of this file's scope --
+    # "no production code is changed here", see module docstring): a stop filed
+    # against the FIRST episode, never discharged by a stopped, still shows up as
+    # pending on a fresh, unrelated, live SECOND episode when read directly. The
+    # fold-plane's status_fold now compensates for this at the Row level (it
+    # anchors to the current episode's seq and drops anything at/before it) --
+    # see test_fold_plane.py::test_undischarged_stop_spans_episode.
     ch = build_log(
         [
             ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),

@@ -1,3 +1,5 @@
+from runstate.observables import Outcome
+
 from runstate_tui.format import format_row
 from runstate_tui.types import Issue, IssueKind, Row, Severity, Status
 
@@ -32,6 +34,17 @@ def test_format_row_full_quintet():
 
 def test_format_row_missing_is_just_the_label():
     assert format_row(_row(status=Status.missing())) == "missing"
+
+
+def test_format_row_appends_terminal_detail_when_present():
+    row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
+    text = format_row(row)
+    assert text.startswith("errored: OOM killed")
+
+
+def test_format_row_omits_detail_suffix_when_absent():
+    row = _row(status=Status.terminal(Outcome.COMPLETED))
+    assert format_row(row) == "done"
 
 
 def test_format_row_renders_corrupt_status_prominently():
@@ -115,3 +128,11 @@ def test_format_detail_shows_live_demand_and_issues_no_episode():
     assert "webui:sub1" in text  # the live demand
     assert "live demand" in text.lower()
     assert "record malformed at seq 4012" in text
+
+
+def test_format_detail_shows_terminal_error_diagnostic():
+    from runstate_tui.format import format_detail
+
+    row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
+    text = format_detail(row)
+    assert "errored: OOM killed" in text

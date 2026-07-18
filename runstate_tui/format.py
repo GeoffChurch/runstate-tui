@@ -7,7 +7,10 @@ from .types import Row
 
 def format_row(row: Row) -> str:
     """Render a Row as one human line; absent factors are omitted."""
-    parts: list[str] = [row.status.label]
+    label = row.status.label
+    if row.status.detail:
+        label += f": {row.status.detail}"  # e.g. "errored: OOM" -- retains RunResult.error
+    parts: list[str] = [label]
     if row.frontier is not None:
         parts.append(f"step {row.frontier}")
     if row.freshness is not None:
