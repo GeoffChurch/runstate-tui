@@ -37,6 +37,7 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "--cov=runstate_tui --cov-report=term-missing"
 
 [tool.coverage.run]
