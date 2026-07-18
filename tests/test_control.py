@@ -17,12 +17,18 @@ def _run(tmp_path: Path, run_id: str):
 def test_stop_run_accepted_when_a_heartbeat_watermark_covers_the_stop(tmp_path):
     ch = _run(tmp_path, "accepted")
     try:
-        seq = ch.send({}, topic=Topic.CONTROL_STOP, request_id="webui:a")
-        ch.send(
-            asdict(Heartbeat(step=1, consumed_seq=seq, t=1.0)),
-            topic=Topic.LIFECYCLE_HEARTBEAT,
-        )
-        outcome = stop_run(ch, request_id="webui:a", timeout=1.0)
+
+        def seed(_interval):
+            # await_consumed's poll gap: the fresh stop stop_run just sent is now
+            # on the log — assert it (right topic + id), then post a watermark AFTER it.
+            stop = ch.latest(Topic.CONTROL_STOP)
+            assert stop is not None and stop.request_id == "webui:a"
+            ch.send(
+                asdict(Heartbeat(step=1, consumed_seq=stop.seq, t=1.0)),
+                topic=Topic.LIFECYCLE_HEARTBEAT,
+            )
+
+        outcome = stop_run(ch, request_id="webui:a", timeout=5.0, sleep=seed)
         assert outcome.result is StopResult.ACCEPTED
         assert outcome.request_id == "webui:a"
     finally:
@@ -32,13 +38,15 @@ def test_stop_run_accepted_when_a_heartbeat_watermark_covers_the_stop(tmp_path):
 def test_stop_run_refused_surfaces_the_nak_reason(tmp_path):
     ch = _run(tmp_path, "refused")
     try:
-        ch.send({}, topic=Topic.CONTROL_STOP, request_id="webui:r")
-        ch.send(
-            asdict(Nak(reason="unsatisfiable", message="nope")),
-            topic=Topic.LIFECYCLE_NAK,
-            request_id="webui:r",
-        )
-        outcome = stop_run(ch, request_id="webui:r", timeout=1.0)
+
+        def seed(_interval):
+            ch.send(
+                asdict(Nak(reason="unsatisfiable", message="nope")),
+                topic=Topic.LIFECYCLE_NAK,
+                request_id="webui:r",
+            )
+
+        outcome = stop_run(ch, request_id="webui:r", timeout=5.0, sleep=seed)
         assert outcome.result is StopResult.REFUSED
         assert outcome.detail == "unsatisfiable"
     finally:
@@ -49,14 +57,16 @@ def test_stop_run_died_when_a_terminal_follows_the_stop(tmp_path):
     ch = _run(tmp_path, "died")
     try:
         ch.send(asdict(Started(handle="h", t=1.0)), topic=Topic.LIFECYCLE_STARTED)
-        ch.send({}, topic=Topic.CONTROL_STOP, request_id="webui:d")
-        ch.send(
-            asdict(Stopped(completed=False, error="killed", final_step=3, t=2.0)),
-            topic=Topic.LIFECYCLE_STOPPED,
-        )
-        outcome = stop_run(ch, request_id="webui:d", timeout=1.0)
+
+        def seed(_interval):
+            ch.send(
+                asdict(Stopped(completed=False, error="killed", final_step=3, t=2.0)),
+                topic=Topic.LIFECYCLE_STOPPED,
+            )
+
+        outcome = stop_run(ch, request_id="webui:d", timeout=5.0, sleep=seed)
         assert outcome.result is StopResult.DIED
-        assert outcome.detail == "errored"  # the RunResult's outcome value
+        assert outcome.detail == "errored"
     finally:
         ch.close()
 

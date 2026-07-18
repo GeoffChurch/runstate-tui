@@ -70,23 +70,10 @@ def stop_run(
     """Send one unconditional `control.stop` and await its answer (bounded).
 
     An empty StopTrigger body (`{}`) is a `from`-less one-shot: the worker fires
-    it at the next safe point. If a `control.stop` for this exact `request_id`
-    is already on the log, that request is reused rather than duplicated — one
-    logical stop per request_id, so a caller that already posted the request
-    (or a retried await) doesn't fork a second, unanswerable one.
-    `await_consumed`'s codomain is the whole answer space — None (accepted) |
-    Nak (refused) | RunResult (died under the request) | TimeoutError (not
-    drained in time)."""
-    pending = [
-        e
-        for e in channel.read(topics=[Topic.CONTROL_STOP], request_ids=[request_id])
-        if e.request_id == request_id
-    ]
-    seq = (
-        pending[-1].seq
-        if pending
-        else channel.send({}, topic=Topic.CONTROL_STOP, request_id=request_id)
-    )
+    it at the next safe point. `await_consumed`'s codomain is the whole answer
+    space — None (accepted) | Nak (refused) | RunResult (died under the
+    request) | TimeoutError (not drained in time)."""
+    seq = channel.send({}, topic=Topic.CONTROL_STOP, request_id=request_id)
     if seq is None:  # provably-lost claim — only reachable with expected_seq; defensive
         return StopOutcome(StopResult.UNDELIVERED, request_id, "stop was not appended (lost claim)")
     try:
