@@ -34,10 +34,10 @@ def test_format_row_missing_is_just_the_label():
 
 def test_format_row_surfaces_issue_badges():
     torn = Issue(
-        kind=IssueKind.TORN,
+        kind=IssueKind.MALFORMED,
         severity=Severity.MEDIUM,
-        message="log torn at seq 4012",
+        message="record malformed at seq 4012",
         seq=4012,
     )
     text = format_row(_row(frontier=3, issues=(torn,)))
-    assert "⚠ log torn at seq 4012" in text
+    assert "⚠ record malformed at seq 4012" in text

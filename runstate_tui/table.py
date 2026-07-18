@@ -45,6 +45,9 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
         return _bare(Status.unreadable())  # corrupt/foreign/unopenable db
     try:
         return status_fold(channel, env)
+    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
+        return _bare(Status.unreadable())  # substrate fault mid-read (a corrupt db
+        # fails every read; byte-torn's json.JSONDecodeError is NOT caught -> it crashes)
     finally:
         channel.close()
 

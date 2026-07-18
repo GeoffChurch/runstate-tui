@@ -1,3 +1,6 @@
+import json
+
+import pytest
 from runstate.observables import Outcome, peek_terminal, progress
 
 from runstate_tui import status_fold
@@ -12,25 +15,25 @@ def test_guarded_passes_through_a_clean_observable(build_log):
     assert value == 5 and issue is None
 
 
-def test_guarded_degrades_a_torn_read_to_a_torn_issue_with_seq(torn_sqlite_channel):
+def test_guarded_lets_byte_torn_propagate(torn_sqlite_channel):
+    # byte-torn = an atomicity violation (a committed non-JSON body). guarded no
+    # longer swallows it — it propagates to crash the cockpit.
     ch = torn_sqlite_channel(
         [({"step": 5, "consumed_seq": 0, "t": 1.0}, "lifecycle.heartbeat", None)],
         torn_seq=1,
     )
-    value, issue = guarded(progress, ch)
-    assert value is None
-    assert issue.kind is IssueKind.TORN and issue.severity is Severity.MEDIUM
-    assert issue.seq == 1  # located in-tree, no upstream ask
+    with pytest.raises(json.JSONDecodeError):
+        guarded(progress, ch)
 
 
-def test_guarded_recovers_seq_from_a_schema_invalid_record_via_exc_seq(build_log):
-    # valid JSON, invalid Stopped schema (missing error/final_step/t) -- peek_terminal
-    # raises MalformedRecordError, which locate_torn_seq (JSON/DB decode errors only)
-    # cannot find; guarded's `exc.seq` fast path is the only recovery for this case.
+def test_guarded_degrades_a_malformed_record_to_a_malformed_issue(build_log):
+    # valid JSON, invalid Stopped schema (missing error/final_step/t) -> peek_terminal
+    # raises MalformedRecordError (runstate's typed, deliberately-propagated signal);
+    # guarded surfaces it as a MALFORMED issue with the record's own seq.
     ch = build_log([({"completed": True}, "lifecycle.stopped", None)])
     value, issue = guarded(peek_terminal, ch)
     assert value is None
-    assert issue.kind is IssueKind.TORN
+    assert issue.kind is IssueKind.MALFORMED and issue.severity is Severity.MEDIUM
     assert issue.seq == 1
 
 
@@ -130,8 +133,9 @@ def test_status_fold_on_a_healthy_live_run(build_log):
     assert row.issues == ()
 
 
-def test_status_fold_degrades_one_torn_factor_not_the_whole_row(torn_sqlite_channel):
-    # a torn heartbeat: frontier is lost + a Torn issue, but the run's verdict survives
+def test_status_fold_lets_byte_torn_propagate(torn_sqlite_channel):
+    # a byte-torn record anywhere in the log crashes the fold (no granular degradation
+    # for corruption): the first read that decodes it raises.
     ch = torn_sqlite_channel(
         [
             ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
@@ -139,37 +143,5 @@ def test_status_fold_degrades_one_torn_factor_not_the_whole_row(torn_sqlite_chan
         ],
         torn_seq=2,
     )
-    row = status_fold(ch, _env(150.0))
-    assert row.status.kind is not StatusKind.UNREADABLE  # NOT collapsed to unreadable
-    assert any(i.kind is IssueKind.TORN for i in row.issues)  # the torn factor is surfaced
-
-
-def test_status_fold_degrades_a_torn_value_not_the_row(torn_sqlite_channel):
-    # a torn `value` record: value is lost + a Torn issue, but the live verdict survives
-    ch = torn_sqlite_channel(
-        [
-            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-            ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
-            ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
-        ],
-        torn_seq=3,
-    )
-    row = status_fold(ch, _env(150.0, objective="loss"))
-    assert row.value is None
-    assert any(i.kind is IssueKind.TORN for i in row.issues)
-    assert row.status.kind is not StatusKind.UNREADABLE  # the run's verdict survives
-    assert row.status.kind is StatusKind.LIVE  # unaffected by the torn value
-
-
-def test_status_fold_degrades_a_torn_started_not_the_row(torn_sqlite_channel):
-    # a torn lifecycle.started (seq 1): elapsed is lost + a Torn issue, no crash
-    ch = torn_sqlite_channel(
-        [
-            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-            ({"step": 3, "consumed_seq": 0, "t": 120.0}, "lifecycle.heartbeat", None),
-        ],
-        torn_seq=1,
-    )
-    row = status_fold(ch, _env(150.0))
-    assert row.elapsed is None
-    assert any(i.kind is IssueKind.TORN for i in row.issues)
+    with pytest.raises(json.JSONDecodeError):
+        status_fold(ch, _env(150.0))

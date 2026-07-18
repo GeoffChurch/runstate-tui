@@ -1,4 +1,6 @@
+import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -96,3 +98,26 @@ def test_singleton_test_single_run_is_the_table_at_one(tmp_path):
     ref = ("r", str(tmp_path), "sqlite")
     env = _env()  # fixed clock -> both fold passes see the same `now`
     assert render_single(ref, env) == render_table(const_resolver(ref), env)[0]
+
+
+def test_open_and_fold_maps_a_substrate_read_fault_to_unreadable(tmp_path, monkeypatch):
+    # a real, openable run; status_fold raises a substrate error mid-read (injected)
+    ch = open_channel("sub", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    ch.close()
+
+    def boom(channel, env):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr("runstate_tui.table.status_fold", boom)
+    row = open_and_fold(("sub", str(tmp_path), "sqlite"), Env(clock=lambda: 1.0))
+    assert row.status.kind is StatusKind.UNREADABLE
+
+
+def test_open_and_fold_lets_byte_torn_propagate(torn_sqlite_channel, tmp_path):
+    # byte-torn is NOT unreadable — it crashes. Build a torn run and fold its ref.
+    torn_sqlite_channel([({"handle": "h", "t": 1.0}, "lifecycle.started", None)], torn_seq=1)
+    # torn_sqlite_channel writes run_id "torn" under tmp_path
+    ref = ("torn", str(tmp_path), "sqlite")
+    with pytest.raises(json.JSONDecodeError):
+        open_and_fold(ref, Env(clock=lambda: 1.0))

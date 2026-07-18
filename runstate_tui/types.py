@@ -16,7 +16,7 @@ class Severity(IntEnum):
 
 
 class IssueKind(Enum):
-    TORN = "torn"
+    MALFORMED = "malformed"
     SKEW_SUSPECTED = "skew_suspected"
     UNSAFE_STOP = "unsafe_stop"
 

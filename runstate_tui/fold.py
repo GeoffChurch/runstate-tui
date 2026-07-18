@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import math
-import sqlite3
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -13,36 +11,23 @@ from runstate.vocabulary.payloads import Topic
 from .env import Env, Liveness, resolve_liveness
 from .types import Issue, IssueKind, Row, Severity, Status
 
-_DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError, MalformedRecordError)
-
 T = TypeVar("T")
 
 
-def locate_torn_seq(channel: Channel) -> int | None:
-    """Find the seq of the first record whose decode raises (append-only contiguity):
-    walk read(after=k, limit=1); a raising probe localizes the tear at k+1."""
-    k = 0
-    last = channel.last_seq()
-    while k < last:
-        try:
-            got = channel.read(after=k, limit=1)
-        except _DECODE_ERRORS:
-            return k + 1
-        if not got:
-            return None
-        k = got[0].seq
-    return None
-
-
 def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Issue | None]:
+    """Run a read; a MalformedRecordError (runstate's typed schema-invalid signal, e.g.
+    version skew) degrades to a MALFORMED issue so the run's other factors survive. A
+    byte-torn body (json.JSONDecodeError) and a substrate fault (sqlite3.DatabaseError)
+    are NOT caught here — the former propagates to crash (an atomicity violation), the
+    latter is caught at the open_and_fold boundary as `unreadable`."""
     try:
         return fn(channel), None
-    except _DECODE_ERRORS as exc:
+    except MalformedRecordError as exc:
         seq = getattr(exc, "seq", None)
-        if seq is None:
-            seq = locate_torn_seq(channel)
-        message = f"log torn at seq {seq}" if seq is not None else "log torn"
-        return None, Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message=message, seq=seq)
+        message = f"record malformed at seq {seq}" if seq is not None else "record malformed"
+        return None, Issue(
+            kind=IssueKind.MALFORMED, severity=Severity.MEDIUM, message=message, seq=seq
+        )
 
 
 def reconcile_status(
@@ -85,11 +70,11 @@ def read_value(channel: Channel, objective: str | None) -> tuple[str, object, in
 
 
 def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
-    started, torn_issue = guarded(
+    started, malformed_issue = guarded(
         lambda ch: ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1), channel
     )
-    if torn_issue is not None:
-        return None, torn_issue  # a torn `started` never masquerades as "no started at all"
+    if malformed_issue is not None:
+        return None, malformed_issue  # a malformed `started` never masquerades as "no started"
     if not started:
         return None, None
     t = started[0].body.get("t")
