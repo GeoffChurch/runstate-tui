@@ -113,14 +113,16 @@ def read_value(channel: Channel, objective: str | None) -> tuple[str, object, in
 
 
 def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
-    started, malformed_issue = guarded(
-        lambda ch: ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1), channel
-    )
+    def _started_t(ch: Channel) -> object:
+        started = ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1)
+        # alien non-dict body -> AttributeError here -> caught by guarded() below
+        return started[0].body.get("t") if started else None
+
+    t, malformed_issue = guarded(_started_t, channel)
     if malformed_issue is not None:
         return None, malformed_issue  # a malformed `started` never masquerades as "no started"
-    if not started:
+    if t is None:
         return None, None
-    t = started[0].body.get("t")
     if not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t):
         return None, None
     if t > now:
@@ -152,8 +154,12 @@ def status_fold(channel: Channel, env: Env) -> Row:
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
-    episode_env, episode_issue = guarded(latest_episode, channel)
-    episode = episode_env.body.get("handle") if episode_env is not None else None
+    def _episode_handle(ch: Channel) -> str | None:
+        started_env = latest_episode(ch)
+        # alien non-dict body -> AttributeError here -> caught by guarded() below
+        return started_env.body.get("handle") if started_env is not None else None
+
+    episode, episode_issue = guarded(_episode_handle, channel)
     if episode_issue is not None:
         issues.append(episode_issue)
 

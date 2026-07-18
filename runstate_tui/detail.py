@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
+from collections.abc import Callable
+from typing import Any
+
 from textual import work
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import RichLog, Static
 
@@ -9,6 +14,12 @@ from .env import Env
 from .format import format_detail, format_envelope
 from .resolver import RunRef
 from .table import read_log_delta, render_single
+
+# a pop mid-tick can race the marshal below onto a torn-down screen three ways:
+# the event loop already closed (RuntimeError), the callback was cancelled
+# (concurrent.futures.CancelledError), or the queried widget already unmounted
+# (textual NoMatches) -- see app.py's analogous stop-teardown guard.
+_TEARDOWN_ERRORS = (RuntimeError, concurrent.futures.CancelledError, NoMatches)
 
 
 class DrillDownScreen(Screen[None]):
@@ -45,6 +56,14 @@ class DrillDownScreen(Screen[None]):
     def _append_log(self, line: str) -> None:
         self.query_one("#detail-log", RichLog).write(line)
 
+    def _marshal(self, fn: Callable[..., Any], *args: Any) -> None:
+        # a pop mid-tick can tear the screen down before this marshals; the
+        # header/log update is best-effort (the fold is re-run each tick anyway).
+        try:
+            self.app.call_from_thread(fn, *args)
+        except _TEARDOWN_ERRORS:
+            pass
+
     @work(thread=True, exclusive=True)
     def _refresh(self) -> None:
         # no `is_mounted` guard here: on pop, Textual's screen-close timer cleanup
@@ -54,9 +73,9 @@ class DrillDownScreen(Screen[None]):
         # now surfaces as a loud `corrupt` header, not a crash, so there is no
         # exception to race a pop.
         row = render_single(self._ref, self._env)
-        self.app.call_from_thread(self._show_head, format_detail(row))
+        self._marshal(self._show_head, format_detail(row))
         # log tail: incremental delta only, watermark-gated inside read_log_delta's read
         for e in read_log_delta(self._ref, after=self._cursor):
-            self.app.call_from_thread(self._append_log, format_envelope(e))
+            self._marshal(self._append_log, format_envelope(e))
             self._cursor = e.seq
-        self.app.call_from_thread(self.set_timer, self._tick_interval, self._tick)
+        self._marshal(self.set_timer, self._tick_interval, self._tick)  # reschedule (best-effort)

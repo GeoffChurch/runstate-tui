@@ -78,6 +78,51 @@ def test_guarded_degrades_an_alien_non_dict_body_to_a_malformed_issue(tmp_path):
         ch.close()
 
 
+def test_open_and_fold_degrades_an_alien_started_body_to_malformed_not_crash(tmp_path):
+    # Pre-fix: read_elapsed's `t = started[0].body.get("t")` ran OUTSIDE any guarded()
+    # call, so an alien non-dict `lifecycle.started` body (valid JSON, e.g. `42`) raised
+    # AttributeError that propagated straight past open_and_fold's except clauses (not
+    # JSONDecodeError, not a substrate fault) -> the fail-fast worker -> a whole-cockpit
+    # crash. Fixed: the `.body.get(...)` read now happens INSIDE guarded(), which degrades
+    # to a MALFORMED issue like any other alien body -- distinct from the byte-torn
+    # `corrupt` class (that's still undecodable JSON, unchanged, see the next test).
+    from runstate_tui import open_and_fold
+
+    run_id = "alien-started"
+    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
+    writer.close()
+    conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))
+    conn.execute("UPDATE log SET body = ? WHERE seq = ?", ("42", 1))
+    conn.commit()
+    conn.close()
+
+    ref = (run_id, str(tmp_path), "sqlite")
+    row = open_and_fold(ref, Env(clock=lambda: 150.0))  # must not raise
+
+    assert row.status.kind is not StatusKind.CORRUPT  # decoded fine -- not the byte-torn class
+    malformed = [i for i in row.issues if i.kind is IssueKind.MALFORMED]
+    assert malformed, row.issues
+    assert any(i.detail is not None and i.detail.startswith("AttributeError") for i in malformed)
+
+
+def test_open_and_fold_still_marks_byte_torn_started_as_corrupt(torn_sqlite_channel, tmp_path):
+    # unchanged: a byte-torn `started` (undecodable JSON, an atomicity violation) is a
+    # different class of failure from an alien-but-decodable body -- it must still
+    # propagate to open_and_fold's json.JSONDecodeError handler as a loud `corrupt` Row.
+    from runstate_tui import open_and_fold
+
+    torn_sqlite_channel(
+        [({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None)],
+        torn_seq=1,
+    ).close()  # fixture already wrote+closed the torn db; this just releases its reader
+
+    ref = ("torn", str(tmp_path), "sqlite")
+    row = open_and_fold(ref, Env(clock=lambda: 150.0))
+
+    assert row.status.kind is StatusKind.CORRUPT
+
+
 def _env(now, **kw):
     return Env(clock=lambda: now, stuck_threshold=60.0, **kw)
 
