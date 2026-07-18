@@ -2,7 +2,10 @@
 name = "runstate-tui"
 version = "0.0.0"
 requires-python = ">=3.11"
-dependencies = ["runstate"]
+dependencies = [
+    "runstate",
+    "textual>=8.2.8",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff", "mypy", "pytest-cov"]
