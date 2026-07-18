@@ -10,6 +10,7 @@ from textual.widgets import Static
 
 from .confirm import ConfirmStopScreen
 from .control import StopOutcome, StopResult, dispatch_stop
+from .detail import DrillDownScreen
 from .env import Env
 from .format import format_row
 from .resolver import RunRef
@@ -32,7 +33,7 @@ class SingleRunApp(App[None]):
     (a genuine bug) escapes and crashes the cockpit rather than self-healing
     into a silent retry (§10 — a crash is not a freeze)."""
 
-    BINDINGS = [("s", "stop", "Stop run")]
+    BINDINGS = [("s", "stop", "Stop run"), ("enter", "detail", "Detail")]
 
     def __init__(
         self,
@@ -74,6 +75,9 @@ class SingleRunApp(App[None]):
         text = format_row(row)
         self.call_from_thread(self._show, text)  # query + update via call_from_thread
         self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
+
+    def action_detail(self) -> None:
+        self.push_screen(DrillDownScreen(self._ref, self._env, self._tick_interval))
 
     # ---- stop: the one effectful arrow (spec §6.2, §13) -----------------
     def action_stop(self) -> None:

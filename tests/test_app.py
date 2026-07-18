@@ -8,6 +8,7 @@ from textual.widgets import Static
 from runstate_tui.app import SingleRunApp
 from runstate_tui.confirm import ConfirmStopScreen
 from runstate_tui.control import StopOutcome, StopResult
+from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
 
 
@@ -69,6 +70,22 @@ async def _shows_corrupt(ref):
         await app.workers.wait_for_complete()
         await pilot.pause(0.05)
         assert "corrupt" in str(app.query_one("#run", Static).content)  # loud, no crash
+
+
+def test_enter_opens_the_drilldown(tmp_path):
+    asyncio.run(_opens_drilldown(tmp_path))
+
+
+async def _opens_drilldown(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DrillDownScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, DrillDownScreen)  # returns to the main view
 
 
 class _RecordingDispatch:
