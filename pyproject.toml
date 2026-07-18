@@ -42,3 +42,8 @@ addopts = "--cov=runstate_tui --cov-report=term-missing"
 [tool.coverage.run]
 source = ["runstate_tui"]
 branch = true
+
+[dependency-groups]
+dev = [
+    "pytest-textual-snapshot>=1.1.0",
+]
