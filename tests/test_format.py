@@ -34,6 +34,20 @@ def test_format_row_missing_is_just_the_label():
     assert format_row(_row(status=Status.missing())) == "missing"
 
 
+def test_format_row_renders_corrupt_status_prominently():
+    torn = Issue(
+        kind=IssueKind.CORRUPT,
+        severity=Severity.HIGH,
+        message="log corrupt at seq 1",
+        seq=1,
+    )
+    row = _row(status=Status.corrupt(), issues=(torn,))
+    text = format_row(row)
+    assert text.startswith("corrupt")  # the status label leads — loud, not buried
+    assert "⚠ log corrupt at seq 1" in text
+    assert row.severity == Severity.HIGH
+
+
 def test_format_row_surfaces_issue_badges():
     torn = Issue(
         kind=IssueKind.MALFORMED,

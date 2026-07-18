@@ -47,9 +47,12 @@ class DrillDownScreen(Screen[None]):
 
     @work(thread=True, exclusive=True)
     def _refresh(self) -> None:
-        if not self.is_mounted:  # popped -> stop the loop
-            return
-        # header: the Row, re-folded off-thread (byte-torn -> crash, per the precursor)
+        # no `is_mounted` guard here: on pop, Textual's screen-close timer cleanup
+        # cancels the pending `set_timer` itself, which is what actually stops this
+        # tick loop (Textual 8.2.8 never resets is_mounted to False, so a guard on it
+        # is unreachable dead code). header: the Row, re-folded off-thread — byte-torn
+        # now surfaces as a loud `corrupt` header, not a crash, so there is no
+        # exception to race a pop.
         row = render_single(self._ref, self._env)
         self.app.call_from_thread(self._show_head, format_detail(row))
         # log tail: incremental delta only, watermark-gated inside read_log_delta's read

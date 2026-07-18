@@ -27,8 +27,9 @@ class SingleRunApp(App[None]):
     shows its Row (see `_fold`). It also carries the one effectful arrow — a
     confirm-gated `stop` (spec §6.2) run on a DEDICATED thread (spec §13) so a
     data-plane stall can never starve the stop key. `_fold` is fail-fast: the
-    fold yields a Row for every legitimate condition, so an escaping exception
-    (byte-torn, or a genuine bug) crashes the cockpit rather than self-healing
+    fold yields a Row for every legitimate condition — byte-torn -> a loud
+    `corrupt` Row, never a crash — so only a truly-unclassifiable exception
+    (a genuine bug) escapes and crashes the cockpit rather than self-healing
     into a silent retry (§10 — a crash is not a freeze)."""
 
     BINDINGS = [("s", "stop", "Stop run")]
@@ -64,11 +65,12 @@ class SingleRunApp(App[None]):
 
     @work(thread=True, exclusive=True)
     def _fold(self) -> None:
-        # fail-fast: the fold yields a Row for every legitimate condition, so an
-        # escaping exception (byte-torn = a runstate atomicity violation, or a genuine
-        # bug) crashes the cockpit rather than self-healing into a silent retry. A
-        # crash is not a freeze — the app exits (§10 holds).
-        row = render_single(self._ref, self._env)  # byte-torn -> raises -> crash
+        # fail-fast: the fold yields a Row for every legitimate condition — byte-torn
+        # is now a loud `corrupt` Row from open_and_fold, never reaching this worker —
+        # so only a truly-unclassifiable exception (a genuine bug) escapes and crashes
+        # the cockpit rather than self-healing into a silent retry. A crash is not a
+        # freeze — the app exits (§10 holds).
+        row = render_single(self._ref, self._env)
         text = format_row(row)
         self.call_from_thread(self._show, text)  # query + update via call_from_thread
         self.call_from_thread(self.set_timer, self._tick_interval, self._tick)

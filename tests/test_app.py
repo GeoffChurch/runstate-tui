@@ -2,10 +2,8 @@ import asyncio
 import threading
 import time
 
-import pytest
 from runstate import open_channel
 from textual.widgets import Static
-from textual.worker import WorkerFailed
 
 from runstate_tui.app import SingleRunApp
 from runstate_tui.confirm import ConfirmStopScreen
@@ -51,9 +49,7 @@ async def _reschedules(tmp_path):
         assert "live" in content  # still rendering correctly after many ticks
 
 
-def test_byte_torn_crashes_the_cockpit(tmp_path):
-    # a byte-torn record is an atomicity violation: the fold worker must crash the
-    # cockpit (WorkerFailed), never self-heal it into a silent retry.
+def test_byte_torn_renders_corrupt_not_crash(tmp_path):
     import sqlite3
 
     ch = open_channel("r", root=tmp_path, backend="sqlite")
@@ -63,18 +59,16 @@ def test_byte_torn_crashes_the_cockpit(tmp_path):
     conn.execute("UPDATE log SET body = ? WHERE seq = 1", ("{not json",))
     conn.commit()
     conn.close()
-
-    ref = ("r", str(tmp_path), "sqlite")
-    with pytest.raises(WorkerFailed):
-        asyncio.run(_crash(ref))
+    asyncio.run(_shows_corrupt(("r", str(tmp_path), "sqlite")))
 
 
-async def _crash(ref):
+async def _shows_corrupt(ref):
     app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0)
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()
         await pilot.pause(0.05)
+        assert "corrupt" in str(app.query_one("#run", Static).content)  # loud, no crash
 
 
 class _RecordingDispatch:
