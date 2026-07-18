@@ -30,8 +30,15 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
     run_id, root, backend = ref
     # stat-before-open (sqlite): a missing pointer must NOT open_channel (that would
     # fabricate a phantom <run_id>.db into a content-addressed store) — spec §4/§11.
-    if backend == "sqlite" and not (Path(root) / f"{run_id}.db").exists():
-        return _bare(Status.missing())
+    # stat() (not Path.exists(), which swallows EACCES into a wrong `missing`) so an
+    # unreadable parent dir (PermissionError) is distinguished from a missing pointer.
+    if backend == "sqlite":
+        try:
+            (Path(root) / f"{run_id}.db").stat()
+        except FileNotFoundError:
+            return _bare(Status.missing())
+        except OSError:
+            return _bare(Status.unreadable())
     try:
         channel = open_channel(run_id, root=root, backend=backend)
     except _OPEN_ERRORS:
@@ -43,6 +50,9 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
 
 
 def render_table(resolver: Resolver, env: Env) -> list[Row]:
+    # `now` is re-sampled per row (once for the resolver, then again in each row's
+    # status_fold) — Stage 4 should capture `now` once per frame for frame-consistent
+    # freshness across the whole table.
     return [open_and_fold(ref, env) for ref in resolver(env.clock())]
 
 

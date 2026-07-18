@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 
+import pytest
 from runstate import open_channel
 
 from runstate_tui.env import Env
@@ -59,6 +61,27 @@ def test_render_table_maps_over_the_resolver_in_order(tmp_path):
     assert len(rows) == 2
     assert rows[0].status.kind is StatusKind.LIVE
     assert rows[1].status.kind is StatusKind.MISSING
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_unreadable_parent_dir_is_unreadable(tmp_path):
+    d = tmp_path / "locked"
+    d.mkdir()
+    (d / "r.db").write_bytes(b"")  # a file exists, but we'll make the dir unsearchable
+    d.chmod(0o000)
+    try:
+        row = open_and_fold(("r", str(d), "sqlite"), _env())
+        assert row.status.kind is StatusKind.UNREADABLE
+    finally:
+        d.chmod(0o755)  # restore so tmp_path cleanup works
+
+
+def test_open_and_fold_memory_backend_skips_stat():
+    run_id = "r"
+    ch = open_channel(run_id, backend="memory")
+    ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
+    row = open_and_fold((run_id, "", "memory"), _env())
+    assert row.status.kind is not StatusKind.MISSING
 
 
 def test_singleton_test_single_run_is_the_table_at_one(tmp_path):
