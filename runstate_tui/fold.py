@@ -4,6 +4,7 @@ import json
 import math
 import sqlite3
 from collections.abc import Callable
+from typing import TypeVar
 
 from runstate.channel import Channel
 from runstate.observables import MalformedRecordError, last_activity, peek_terminal, progress
@@ -13,6 +14,8 @@ from .env import Env, Liveness, resolve_liveness
 from .types import Issue, IssueKind, Row, Severity, Status
 
 _DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError, MalformedRecordError)
+
+T = TypeVar("T")
 
 
 def locate_torn_seq(channel: Channel) -> int | None:
@@ -31,7 +34,7 @@ def locate_torn_seq(channel: Channel) -> int | None:
     return None
 
 
-def guarded(fn: Callable[[Channel], object], channel: Channel) -> tuple[object | None, Issue | None]:
+def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Issue | None]:
     try:
         return fn(channel), None
     except _DECODE_ERRORS as exc:
@@ -42,19 +45,26 @@ def guarded(fn: Callable[[Channel], object], channel: Channel) -> tuple[object |
         return None, Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message=message, seq=seq)
 
 
-def reconcile_status(channel: Channel, env: Env, now: float) -> tuple[Status, float | None, list[Issue]]:
+def reconcile_status(
+    channel: Channel, env: Env, now: float
+) -> tuple[Status, float | None, list[Issue]]:
     issues: list[Issue] = []
     result, term_issue = guarded(peek_terminal, channel)
     if term_issue is not None:
         issues.append(term_issue)
 
-    la, la_issue = guarded(last_activity, channel)   # the ONE last_activity read
+    la, la_issue = guarded(last_activity, channel)  # the ONE last_activity read
     if la_issue is not None:
         issues.append(la_issue)
     freshness = None if la is None else max(0.0, now - la)
     if isinstance(la, (int, float)) and not isinstance(la, bool) and la > now:
-        issues.append(Issue(kind=IssueKind.SKEW_SUSPECTED, severity=Severity.MEDIUM,
-                            message="last activity is in the future (clock skew)"))
+        issues.append(
+            Issue(
+                kind=IssueKind.SKEW_SUSPECTED,
+                severity=Severity.MEDIUM,
+                message="last activity is in the future (clock skew)",
+            )
+        )
 
     if result is not None:
         return Status.terminal(result.outcome), freshness, issues  # terminal wins
@@ -75,7 +85,9 @@ def read_value(channel: Channel, objective: str | None) -> tuple[str, object, in
 
 
 def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
-    started, torn_issue = guarded(lambda ch: ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1), channel)
+    started, torn_issue = guarded(
+        lambda ch: ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1), channel
+    )
     if torn_issue is not None:
         return None, torn_issue  # a torn `started` never masquerades as "no started at all"
     if not started:
@@ -85,8 +97,10 @@ def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | No
         return None, None
     if t > now:
         return 0.0, Issue(
-            kind=IssueKind.SKEW_SUSPECTED, severity=Severity.MEDIUM,
-            message="run epoch is in the future (clock skew)", detail=f"started.t={t} > now={now}",
+            kind=IssueKind.SKEW_SUSPECTED,
+            severity=Severity.MEDIUM,
+            message="run epoch is in the future (clock skew)",
+            detail=f"started.t={t} > now={now}",
         )
     return now - float(t), None
 
@@ -110,5 +124,12 @@ def status_fold(channel: Channel, env: Env) -> Row:
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
-    return Row(status=status, frontier=frontier, freshness=freshness, value=value,
-               elapsed=elapsed, episode=None, issues=tuple(issues))
+    return Row(
+        status=status,
+        frontier=frontier,
+        freshness=freshness,
+        value=value,
+        elapsed=elapsed,
+        episode=None,
+        issues=tuple(issues),
+    )

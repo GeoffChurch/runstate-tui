@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import Any
+
+from runstate.observables import Outcome
 
 
 class Severity(IntEnum):
     """Row/issue severity — int-valued so a row's badge is `max(...)`."""
+
     OK = 0
     INFO = 1
     MEDIUM = 2
@@ -60,29 +62,43 @@ _STATUS_SEVERITY = {
 @dataclass(frozen=True)
 class Status:
     kind: StatusKind
-    outcome: Any | None = None  # set iff kind is TERMINAL; a runstate Outcome
+    outcome: Outcome | None = None  # set iff kind is TERMINAL
 
     @classmethod
-    def pending(cls) -> "Status": return cls(StatusKind.PENDING)
+    def pending(cls) -> Status:
+        return cls(StatusKind.PENDING)
+
     @classmethod
-    def live(cls) -> "Status": return cls(StatusKind.LIVE)
+    def live(cls) -> Status:
+        return cls(StatusKind.LIVE)
+
     @classmethod
-    def stale(cls) -> "Status": return cls(StatusKind.STALE)
+    def stale(cls) -> Status:
+        return cls(StatusKind.STALE)
+
     @classmethod
-    def missing(cls) -> "Status": return cls(StatusKind.MISSING)
+    def missing(cls) -> Status:
+        return cls(StatusKind.MISSING)
+
     @classmethod
-    def unreadable(cls) -> "Status": return cls(StatusKind.UNREADABLE)
+    def unreadable(cls) -> Status:
+        return cls(StatusKind.UNREADABLE)
+
     @classmethod
-    def conflicted(cls) -> "Status": return cls(StatusKind.CONFLICTED)
+    def conflicted(cls) -> Status:
+        return cls(StatusKind.CONFLICTED)
+
     @classmethod
-    def terminal(cls, outcome: Any) -> "Status": return cls(StatusKind.TERMINAL, outcome)
+    def terminal(cls, outcome: Outcome) -> Status:
+        return cls(StatusKind.TERMINAL, outcome)
 
     @property
     def label(self) -> str:
         if self.kind is StatusKind.TERMINAL:
+            assert self.outcome is not None  # invariant: set iff kind is TERMINAL
             # render honestly: an unrecognized outcome falls back to its own wire string
             return _TERMINAL_LABELS.get(str(self.outcome.value), str(self.outcome.value))
-        return self.kind.value
+        return str(self.kind.value)
 
     @property
     def severity(self) -> Severity:
@@ -93,10 +109,10 @@ class Status:
 class Row:
     status: Status
     frontier: int | None
-    freshness: float | None                      # age = max(0, now - last_activity)
+    freshness: float | None  # age = max(0, now - last_activity)
     value: tuple[str, object, int | None] | None  # (name, scalar, step)
-    elapsed: float | None                        # now - first started.t; None if no started
-    episode: str | None                          # latest_episode handle (PURE); None in Stage 0
+    elapsed: float | None  # now - first started.t; None if no started
+    episode: str | None  # latest_episode handle (PURE); None in Stage 0
     issues: tuple[Issue, ...]
 
     @property

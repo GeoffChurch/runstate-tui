@@ -1,4 +1,4 @@
-from runstate_tui.env import Env, Liveness, FreshnessSignal, resolve_liveness
+from runstate_tui.env import Env, FreshnessSignal, Liveness, resolve_liveness
 
 
 def test_freshness_signal_live_stale_and_no_opinion(build_log):
@@ -11,7 +11,10 @@ def test_freshness_signal_live_stale_and_no_opinion(build_log):
 
 def test_signals_are_consulted_in_order_first_opinion_wins(build_log):
     ch = build_log([])
+
     class AlwaysDead:
-        def liveness(self, channel, env, now, last_activity): return Liveness.DEAD
+        def liveness(self, channel, env, now, last_activity):
+            return Liveness.DEAD
+
     env = Env(clock=lambda: 0.0, liveness=(AlwaysDead(), FreshnessSignal()))
     assert resolve_liveness(ch, env, now=0.0, last_activity=None) is Liveness.DEAD

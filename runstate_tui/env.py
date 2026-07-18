@@ -17,16 +17,18 @@ class Liveness(Enum):
 class LivenessSignal(Protocol):
     # last_activity is read once by the fold and passed in, so the signal is pure and
     # can't double-read; a channel-reading overlay (probe) still gets the channel.
-    def liveness(self, channel: Channel, env: "Env", now: float,
-                 last_activity: float | None) -> Liveness | None: ...
+    def liveness(
+        self, channel: Channel, env: Env, now: float, last_activity: float | None
+    ) -> Liveness | None: ...
 
 
 @dataclass(frozen=True)
 class FreshnessSignal:
     """The core's only liveness signal: a pure verdict from the log's last-activity clock."""
 
-    def liveness(self, channel: Channel, env: "Env", now: float,
-                 last_activity: float | None) -> Liveness | None:
+    def liveness(
+        self, channel: Channel, env: Env, now: float, last_activity: float | None
+    ) -> Liveness | None:
         if last_activity is None:
             return None  # no dated activity -> no opinion (the fold decides pending)
         age = max(0.0, now - last_activity)
@@ -41,8 +43,9 @@ class Env:
     liveness: tuple[LivenessSignal, ...] = field(default_factory=lambda: (FreshnessSignal(),))
 
 
-def resolve_liveness(channel: Channel, env: Env, now: float,
-                     last_activity: float | None) -> Liveness | None:
+def resolve_liveness(
+    channel: Channel, env: Env, now: float, last_activity: float | None
+) -> Liveness | None:
     for signal in env.liveness:  # order == precedence; overlays register ahead of freshness
         verdict = signal.liveness(channel, env, now, last_activity)
         if verdict is not None:

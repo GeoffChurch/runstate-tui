@@ -1,6 +1,6 @@
 from runstate.observables import Outcome
 
-from runstate_tui.types import Severity, IssueKind, Issue, Status, StatusKind
+from runstate_tui.types import Issue, IssueKind, Row, Severity, Status, StatusKind
 
 
 def test_severity_orders_and_maxes():
@@ -9,8 +9,12 @@ def test_severity_orders_and_maxes():
 
 
 def test_issue_is_a_frozen_value():
-    a = Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message="log torn at seq 4012", seq=4012)
-    b = Issue(kind=IssueKind.TORN, severity=Severity.MEDIUM, message="log torn at seq 4012", seq=4012)
+    a = Issue(
+        kind=IssueKind.TORN, severity=Severity.MEDIUM, message="log torn at seq 4012", seq=4012
+    )
+    b = Issue(
+        kind=IssueKind.TORN, severity=Severity.MEDIUM, message="log torn at seq 4012", seq=4012
+    )
     assert a == b
     assert a.detail is None
 
@@ -27,6 +31,7 @@ def test_unknown_outcome_renders_honestly_not_a_default():
     # a future/unknown Outcome member must render via its own wire string
     class FakeOutcome:
         value = "suspended"
+
     s = Status.terminal(FakeOutcome())
     assert s.label == "suspended"
 
@@ -39,12 +44,16 @@ def test_status_severity_map():
     assert Status.terminal(Outcome.COMPLETED).severity is Severity.OK
 
 
-from runstate_tui.types import Row
-
-
 def _bare_row(**kw):
-    base = dict(status=Status.live(), frontier=10, freshness=1.0, value=None,
-                elapsed=5.0, episode=None, issues=())
+    base = dict(
+        status=Status.live(),
+        frontier=10,
+        freshness=1.0,
+        value=None,
+        elapsed=5.0,
+        episode=None,
+        issues=(),
+    )
     base.update(kw)
     return Row(**base)
 

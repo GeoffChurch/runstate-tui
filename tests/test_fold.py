@@ -1,6 +1,9 @@
-from runstate.observables import peek_terminal, progress
-from runstate_tui.fold import guarded
-from runstate_tui.types import IssueKind, Severity
+from runstate.observables import Outcome, peek_terminal, progress
+
+from runstate_tui import status_fold
+from runstate_tui.env import Env
+from runstate_tui.fold import guarded, read_elapsed, read_value, reconcile_status
+from runstate_tui.types import IssueKind, Row, Severity, StatusKind
 
 
 def test_guarded_passes_through_a_clean_observable(build_log):
@@ -31,21 +34,21 @@ def test_guarded_recovers_seq_from_a_schema_invalid_record_via_exc_seq(build_log
     assert issue.seq == 1
 
 
-from runstate.observables import Outcome
-from runstate_tui.env import Env
-from runstate_tui.fold import reconcile_status
-from runstate_tui.types import StatusKind
-
-
 def _env(now, **kw):
     return Env(clock=lambda: now, stuck_threshold=60.0, **kw)
 
 
 def test_terminal_wins(build_log):
-    ch = build_log([
-        ({"handle": "local://h/1", "t": 1.0}, "lifecycle.started", None),
-        ({"completed": True, "error": None, "final_step": 3, "t": 2.0}, "lifecycle.stopped", None),
-    ])
+    ch = build_log(
+        [
+            ({"handle": "local://h/1", "t": 1.0}, "lifecycle.started", None),
+            (
+                {"completed": True, "error": None, "final_step": 3, "t": 2.0},
+                "lifecycle.stopped",
+                None,
+            ),
+        ]
+    )
     status, freshness, issues = reconcile_status(ch, _env(100.0), now=100.0)
     assert status.kind is StatusKind.TERMINAL and status.outcome is Outcome.COMPLETED
     assert issues == []
@@ -74,24 +77,25 @@ def test_reconcile_status_flags_skew_when_last_activity_is_in_the_future(build_l
     assert status.kind is StatusKind.LIVE
 
 
-from runstate_tui.fold import read_value, read_elapsed
-
-
 def test_value_is_named_and_none_without_an_objective(build_log):
-    ch = build_log([
-        ({"value": 0.5, "step": 4, "t": 1.0}, "value", "loss"),
-        ({"value": 0.9, "step": 4, "t": 1.0}, "value", "acc"),
-    ])
-    assert read_value(ch, objective=None) is None            # never nameless
+    ch = build_log(
+        [
+            ({"value": 0.5, "step": 4, "t": 1.0}, "value", "loss"),
+            ({"value": 0.9, "step": 4, "t": 1.0}, "value", "acc"),
+        ]
+    )
+    assert read_value(ch, objective=None) is None  # never nameless
     assert read_value(ch, objective="loss") == ("loss", 0.5, 4)
     assert read_value(ch, objective="missing") is None
 
 
 def test_elapsed_is_wall_age_from_first_started(build_log):
-    ch = build_log([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"handle": "local://h/2", "t": 200.0}, "lifecycle.started", None),  # a later episode
-    ])
+    ch = build_log(
+        [
+            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+            ({"handle": "local://h/2", "t": 200.0}, "lifecycle.started", None),  # a later episode
+        ]
+    )
     elapsed, issue = read_elapsed(ch, now=250.0)
     assert elapsed == 150.0 and issue is None  # from the FIRST started (100.0), not the latest
 
@@ -108,16 +112,14 @@ def test_elapsed_never_negative_and_flags_skew(build_log):
     assert issue.kind is IssueKind.SKEW_SUSPECTED
 
 
-from runstate_tui import status_fold
-from runstate_tui.types import Row, StatusKind
-
-
 def test_status_fold_on_a_healthy_live_run(build_log):
-    ch = build_log([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
-        ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
-    ])
+    ch = build_log(
+        [
+            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+            ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
+            ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
+        ]
+    )
     row = status_fold(ch, _env(150.0, objective="loss"))
     assert isinstance(row, Row)
     assert row.status.kind is StatusKind.LIVE
@@ -130,35 +132,44 @@ def test_status_fold_on_a_healthy_live_run(build_log):
 
 def test_status_fold_degrades_one_torn_factor_not_the_whole_row(torn_sqlite_channel):
     # a torn heartbeat: frontier is lost + a Torn issue, but the run's verdict survives
-    ch = torn_sqlite_channel([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
-    ], torn_seq=2)
+    ch = torn_sqlite_channel(
+        [
+            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+            ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
+        ],
+        torn_seq=2,
+    )
     row = status_fold(ch, _env(150.0))
-    assert row.status.kind is not StatusKind.UNREADABLE      # NOT collapsed to unreadable
+    assert row.status.kind is not StatusKind.UNREADABLE  # NOT collapsed to unreadable
     assert any(i.kind is IssueKind.TORN for i in row.issues)  # the torn factor is surfaced
 
 
 def test_status_fold_degrades_a_torn_value_not_the_row(torn_sqlite_channel):
     # a torn `value` record: value is lost + a Torn issue, but the live verdict survives
-    ch = torn_sqlite_channel([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
-        ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
-    ], torn_seq=3)
+    ch = torn_sqlite_channel(
+        [
+            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+            ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
+            ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
+        ],
+        torn_seq=3,
+    )
     row = status_fold(ch, _env(150.0, objective="loss"))
     assert row.value is None
     assert any(i.kind is IssueKind.TORN for i in row.issues)
     assert row.status.kind is not StatusKind.UNREADABLE  # the run's verdict survives
-    assert row.status.kind is StatusKind.LIVE             # unaffected by the torn value
+    assert row.status.kind is StatusKind.LIVE  # unaffected by the torn value
 
 
 def test_status_fold_degrades_a_torn_started_not_the_row(torn_sqlite_channel):
     # a torn lifecycle.started (seq 1): elapsed is lost + a Torn issue, no crash
-    ch = torn_sqlite_channel([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"step": 3, "consumed_seq": 0, "t": 120.0}, "lifecycle.heartbeat", None),
-    ], torn_seq=1)
+    ch = torn_sqlite_channel(
+        [
+            ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+            ({"step": 3, "consumed_seq": 0, "t": 120.0}, "lifecycle.heartbeat", None),
+        ],
+        torn_seq=1,
+    )
     row = status_fold(ch, _env(150.0))
     assert row.elapsed is None
     assert any(i.kind is IssueKind.TORN for i in row.issues)
