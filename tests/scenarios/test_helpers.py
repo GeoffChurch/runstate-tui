@@ -59,16 +59,30 @@ def test_answer_on_sleep_fires_on_the_kth_call(build_log, answer_on_sleep):
 
 
 def test_log_text_extracts_strip_text():
-    from textual.strip import Strip
+    # a real RichLog with NON-empty written lines -- blank Strips render "" regardless
+    # of what log_text does, so a prior version of this test (Strip.blank(0)/Strip([]))
+    # would still pass even if log_text returned ["" for _ in richlog.lines]. This
+    # version fails if log_text stops pulling .text off each Strip.
+    asyncio.run(_log_text_extracts_strip_text())
+
+
+async def _log_text_extracts_strip_text():
+    from textual.app import App, ComposeResult
+    from textual.widgets import RichLog
 
     from tests.helpers import log_text
 
-    class FakeRichLog:
-        lines = [Strip.blank(0), Strip([])]
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield RichLog(id="log")
 
-    # Strip.blank(0)/Strip([]) both render empty text; the point is log_text
-    # walks .lines and pulls .text off each Strip without touching layout.
-    assert log_text(FakeRichLog()) == ["", ""]
+    app = Host()
+    async with app.run_test() as pilot:
+        rl = app.query_one("#log", RichLog)
+        rl.write("hello world")
+        rl.write("second line")
+        await pilot.pause()
+        assert log_text(rl) == ["hello world", "second line"]
 
 
 def test_corrupt_seq_plants_torn_and_alien(tmp_path, build_log):

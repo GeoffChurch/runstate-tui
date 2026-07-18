@@ -125,7 +125,26 @@ def test_terminal_errored_via_stopped(build_log):
     )
     row = status_fold(ch, _env(10.0))
     assert row.status.kind is StatusKind.TERMINAL and row.status.outcome is Outcome.ERRORED
+    # FINDING: RunResult.error diagnostic is dropped -- Status.terminal() only threads .outcome
     assert "OOM" not in repr(row)  # the error string is nowhere on the Row
+
+
+def test_error_empty_string_is_errored(build_log):
+    # error="" is falsy but `is not None` -- peek_terminal's outcome check is
+    # `s.error is not None`, not truthiness, so an empty-string error still reads
+    # as ERRORED rather than falling through to the completed/preempted branches.
+    ch = build_log(
+        [
+            ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
+            (
+                {"completed": False, "error": "", "final_step": 3, "t": 5.0},
+                "lifecycle.stopped",
+                None,
+            ),
+        ]
+    )
+    row = status_fold(ch, _env(10.0))
+    assert row.status.kind is StatusKind.TERMINAL and row.status.outcome is Outcome.ERRORED
 
 
 def test_schema_invalid_stopped_completed_with_error(build_log):
@@ -286,6 +305,19 @@ def test_foreign_valid_db_reads_pending(foreign_db):
     assert "unrelated" in tables  # the alien table is untouched, not replaced
 
 
+def test_malformed_value_silently_tolerated(build_log):
+    # FINDING: malformed surfaces ONLY from peek_terminal; tolerant reads
+    # (value/heartbeat) silently return None -- a `value` record missing its own
+    # `"value"` key isn't a verdict-plane record (read_value never raises,
+    # MalformedRecordError-style), so it's read as a present-but-null value with
+    # NO issue at all, not surfaced as MALFORMED the way a bad `stopped` would be.
+    ch = build_log([({"step": 4, "t": 140.0}, "value", "loss")])
+    row = status_fold(ch, _env(200.0, objective="loss"))
+    assert row.value == ("loss", None, 4)
+    assert row.status.kind is StatusKind.PENDING  # unaffected by the malformed value
+    assert row.issues == ()
+
+
 # --- Time / clocks -------------------------------------------------------------
 
 
@@ -342,6 +374,25 @@ def test_elapsed_skew_isolated_from_freshness(build_log):
     assert "run epoch" in skew_issues[0].message
 
 
+def test_both_future_skew_fires_twice(build_log):
+    # A `started` AND a `heartbeat` both stamped after `now`: the Row carries TWO
+    # independent SKEW_SUSPECTED issues -- one from reconcile_status's freshness
+    # `la > now` path (la is the heartbeat, the latest dated t) and one from
+    # read_elapsed's own `started.t > now` path. The two skew checks don't share
+    # or dedup an issue even when they're both tripped by the same future clock.
+    ch = build_log(
+        [
+            ({"handle": "h1", "t": 500.0}, "lifecycle.started", None),
+            ({"step": 1, "consumed_seq": 0, "t": 900.0}, "lifecycle.heartbeat", None),
+        ]
+    )
+    row = status_fold(ch, _env(100.0))
+    skew_issues = [i for i in row.issues if i.kind is IssueKind.SKEW_SUSPECTED]
+    assert len(skew_issues) == 2
+    assert "last activity" in skew_issues[0].message
+    assert "run epoch" in skew_issues[1].message
+
+
 def test_captured_once_per_frame(build_log, counting_env):
     # `now = env.clock()` is captured ONCE at the top of status_fold and threaded
     # everywhere -- not re-read per field. counting_env's clock returns base+n on
@@ -369,6 +420,27 @@ def test_t_exactly_zero_not_falsy(build_log):
     elapsed, issue = read_elapsed(ch, now=50.0)
     assert elapsed == 50.0  # computed, not dropped
     assert issue is None
+
+
+def test_clock_moves_backward(build_log):
+    # each fold is stateless over now -- a backward observer clock flags skew on
+    # a previously-clean run. Same log (one heartbeat, t=150), folded TWICE with
+    # a LATER now first and an EARLIER now second: the first fold is clean; the
+    # second, with the observer's clock having regressed, reads the SAME activity
+    # as now being in the future and raises SKEW_SUSPECTED -- nothing is cached
+    # or carried between the two folds, the flip comes purely from `now`.
+    ch = build_log([({"step": 1, "consumed_seq": 0, "t": 150.0}, "lifecycle.heartbeat", None)])
+    row1 = status_fold(ch, _env(200.0))
+    assert row1.status.kind is StatusKind.LIVE
+    assert row1.freshness == 50.0
+    assert row1.issues == ()
+
+    row2 = status_fold(ch, _env(100.0))
+    assert row2.status.kind is StatusKind.LIVE
+    assert row2.freshness == 0.0  # max(0, now - la) clamps the negative age
+    skew_issues = [i for i in row2.issues if i.kind is IssueKind.SKEW_SUSPECTED]
+    assert len(skew_issues) == 1
+    assert "clock skew" in skew_issues[0].message
 
 
 # --- Episodes / ordering ---------------------------------------------------

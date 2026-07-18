@@ -14,8 +14,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+import pytest
 from runstate.observables import live_demand, live_episode, undischarged_stops
 from runstate.vocabulary.payloads import Heartbeat, Nak, Stopped, Topic
+from runstate.watcher import await_consumed
 
 from runstate_tui.control import StopResult, dispatch_stop, stop_run
 from tests.helpers import fake_clock
@@ -276,3 +278,22 @@ def test_dispatch_stop_missing_no_phantom(tmp_path):
     assert outcome.result is StopResult.UNDELIVERED
     # the phantom-db guard: no <run_id>.db was fabricated to write a stop into
     assert not (tmp_path / "ghost.db").exists()
+
+
+def test_reqid_absent_cannot_be_refused(build_log):
+    # FINDING: a request_id=None handshake can't see a refusal -- this locks that
+    # stop_run/dispatch_stop always pass a real webui: id. await_consumed's
+    # `_answer()` returns None UNCONDITIONALLY when request_id is None (it never
+    # even reads the nak topic), so a nak on the log -- even one that directly
+    # answers this exact (id-less) stop -- is invisible to the positional answer
+    # fold: the call can only ever time out, never resolve REFUSED.
+    ch = build_log([])
+    seq = ch.send({}, topic=Topic.CONTROL_STOP, request_id=None)
+    ch.send(
+        asdict(Nak(reason="unsatisfiable", message="nope")),
+        topic=Topic.LIFECYCLE_NAK,
+        request_id=None,
+    )
+    now, sleep = fake_clock(100.0, 100.0, 101.0, 102.0, 103.0, 104.0)
+    with pytest.raises(TimeoutError):
+        await_consumed(ch, seq, request_id=None, timeout=1.0, now=now, sleep=sleep)

@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 
 from runstate import open_channel
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Static
 
+from runstate_tui import detail as detail_module
 from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
 from tests.helpers import advance_tick, corrupt_seq, log_text
@@ -403,3 +406,56 @@ async def _sqlite_wal_held_writer(held_writer_sqlite_run):
         await advance_tick(pilot, screen)  # each tick opens its OWN fresh reader
         assert len(_log(screen)) == 2
         assert screen._cursor == 2
+
+
+# --- pop mid-tick (teardown race) ---------------------------------------------------
+
+
+def test_pop_mid_tick_does_not_crash(tmp_path, monkeypatch):
+    # Covers detail.py's teardown guard (_TEARDOWN_ERRORS / _marshal's try/except):
+    # a pop mid-tick can race _refresh's off-thread _marshal calls onto a torn-down
+    # screen. Deterministic instead of a blind sleep: render_single is patched to
+    # block on a threading.Event, so the pop is GUARANTEED to land while the tick
+    # is still mid-flight, and _marshal's call_from_thread calls are GUARANTEED to
+    # run only after the screen has been popped (confirmed empirically: this races
+    # self.app -- NoActiveAppError, a RuntimeError subclass already inside
+    # _TEARDOWN_ERRORS -- 100% of the time under this synchronization, not
+    # occasionally). Mirrors test_app.py's stop-teardown discipline: the
+    # threading.excepthook is installed OUTSIDE asyncio.run so it survives loop
+    # teardown, in case anything escapes _marshal's own guard.
+    errors: list[str] = []
+    old_hook = threading.excepthook
+    threading.excepthook = lambda a: errors.append(a.exc_type.__name__)
+    try:
+        asyncio.run(_pop_mid_tick(tmp_path, monkeypatch))
+        time.sleep(0.2)  # let any teardown exception on the tick's thread fire
+    finally:
+        threading.excepthook = old_hook
+    assert errors == [], f"tick thread raised at teardown: {errors}"
+
+
+async def _pop_mid_tick(tmp_path, monkeypatch):
+    ref = _sqlite_run(tmp_path, "popmid", [({"handle": "h1", "t": 1.0}, "lifecycle.started", None)])
+    entered = threading.Event()
+    release = threading.Event()
+    orig_render_single = detail_module.render_single
+
+    def slow_render_single(ref, env):
+        entered.set()
+        release.wait(2.0)  # keep the tick in-flight until after the pop below
+        return orig_render_single(ref, env)
+
+    monkeypatch.setattr(detail_module, "render_single", slow_render_single)
+
+    app = _Host()
+    async with app.run_test() as pilot:
+        screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=0.02)
+        await app.push_screen(screen)  # on_mount fires the first tick
+        for _ in range(200):
+            await pilot.pause(0.01)
+            if entered.is_set():
+                break
+        assert entered.is_set(), "the tick never entered render_single -- can't test the race"
+        await app.pop_screen()  # pop WHILE render_single is still blocked mid-tick
+        release.set()  # let the in-flight tick proceed -> its _marshal calls now race the pop
+        await pilot.pause(0.3)  # give the worker thread time to finish and marshal (or not crash)
