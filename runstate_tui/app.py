@@ -90,13 +90,19 @@ class SingleRunApp(App[None]):
         ).start()
 
     def _run_stop(self, request_id: str) -> None:
+        # pre-initialised so the `finally` can always report SOMETHING and reset
+        # the guard — the stop key must reset even if _stop_dispatch raises a
+        # BaseException (KeyboardInterrupt/SystemExit); otherwise a latched
+        # _stop_in_flight wedges the key shut forever.
+        outcome = StopOutcome(StopResult.UNDELIVERED, request_id, "stop did not complete")
         try:
             outcome = self._stop_dispatch(self._ref, request_id, self._stop_timeout)
-        except Exception as exc:  # dispatch is total, but the thread must never die silently
+        except Exception as exc:  # a total dispatch shouldn't raise; report, don't die silently
             outcome = StopOutcome(
                 StopResult.UNDELIVERED, request_id, f"stop dispatch error: {exc!r}"
             )
-        self.call_from_thread(self._finish_stop, outcome)
+        finally:
+            self.call_from_thread(self._finish_stop, outcome)
 
     def _finish_stop(self, outcome: StopOutcome) -> None:
         self._stop_in_flight = False

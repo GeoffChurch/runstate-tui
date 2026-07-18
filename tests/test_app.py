@@ -168,33 +168,95 @@ async def _unsafe(tmp_path):
         assert "⚠ unsafe stop" in str(app.query_one("#stop", Static).content)
 
 
-def test_stop_completes_while_the_fold_is_slow(tmp_path, monkeypatch):
-    # the dedicated-thread proof: a slow fold must not delay the stop outcome.
-    asyncio.run(_slow_fold_stop(tmp_path, monkeypatch))
+def test_stop_runs_on_the_dedicated_thread(tmp_path):
+    asyncio.run(_dedicated_thread(tmp_path))
 
 
-async def _slow_fold_stop(tmp_path, monkeypatch):
-    import time as _time
-
-    import runstate_tui.app as appmod
-
+async def _dedicated_thread(tmp_path):
     ref = _live_sqlite_run(tmp_path)
-    real = appmod.render_single
+    seen: dict[str, str] = {}
 
-    def slow(r, e):
-        _time.sleep(0.4)  # a slow (not wedged) fold on the fold worker
-        return real(r, e)
+    def dispatch(r, request_id, timeout):
+        seen["thread"] = threading.current_thread().name
+        return StopOutcome(StopResult.ACCEPTED, request_id)
 
-    monkeypatch.setattr(appmod, "render_single", slow)
-    fake = _RecordingDispatch(StopOutcome(StopResult.ACCEPTED, "webui:x"))
-    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=fake)
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=dispatch)
     async with app.run_test() as pilot:
         await pilot.press("s")
         await pilot.pause()
         await pilot.press("y")
-        # the stop must land well before a 0.4s fold would; poll briefly
-        for _ in range(20):
+        for _ in range(50):
             await pilot.pause(0.01)
-            if fake.calls:
+            if "thread" in seen:
                 break
-        assert fake.calls, "stop did not run while the fold was slow (thread not dedicated?)"
+    # the handshake ran on the DEDICATED 'stop-handshake' thread — proving it is
+    # neither the UI/MainThread (a sync dispatch would freeze the cockpit) nor a
+    # Textual worker-pool thread shared with the fold (§13). Either regression
+    # would surface a different thread name here.
+    assert seen.get("thread") == "stop-handshake"
+
+
+def test_stop_guard_resets_after_a_raising_dispatch(tmp_path):
+    asyncio.run(_guard_resets(tmp_path))
+
+
+async def _guard_resets(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    calls: list[str] = []
+
+    def raising(r, request_id, timeout):
+        calls.append(request_id)
+        if len(calls) == 1:
+            raise RuntimeError("boom")  # first dispatch explodes
+        return StopOutcome(StopResult.ACCEPTED, request_id)
+
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=raising)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(50):
+            await pilot.pause(0.01)
+            if len(calls) == 1:
+                break
+        await pilot.pause(0.05)
+        # the guard must have reset despite the raise -> a second stop dispatches
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(50):
+            await pilot.pause(0.01)
+            if len(calls) == 2:
+                break
+    assert len(calls) == 2  # no latch: the stop key survived a failed dispatch
+
+
+def test_second_stop_ignored_while_one_is_in_flight(tmp_path):
+    asyncio.run(_in_flight_guard(tmp_path))
+
+
+async def _in_flight_guard(tmp_path):
+    ref = _live_sqlite_run(tmp_path)
+    release = threading.Event()
+    calls: list[str] = []
+
+    def blocking(r, request_id, timeout):
+        calls.append(request_id)
+        release.wait(2.0)  # hold the stop in-flight until released
+        return StopOutcome(StopResult.ACCEPTED, request_id)
+
+    app = SingleRunApp(ref, Env(clock=lambda: 150.0), tick_interval=999.0, stop_dispatch=blocking)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(50):
+            await pilot.pause(0.01)
+            if len(calls) == 1:
+                break
+        # a second press while the first stop is still in-flight must NOT dispatch
+        await pilot.press("s")
+        await pilot.pause(0.05)
+        assert len(calls) == 1
+        release.set()
+        await pilot.pause(0.05)
