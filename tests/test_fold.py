@@ -64,6 +64,16 @@ def test_live_then_stale_by_freshness(build_log):
     assert reconcile_status(ch, _env(1000.0), now=1000.0)[0].kind is StatusKind.STALE
 
 
+def test_reconcile_status_flags_skew_when_last_activity_is_in_the_future(build_log):
+    # last_activity dated ahead of `now` (clock skew): flag it, clamp freshness >= 0,
+    # and don't let the skew read as staleness (age clamps to 0 -> LIVE).
+    ch = build_log([({"step": 1, "consumed_seq": 0, "t": 500.0}, "lifecycle.heartbeat", None)])
+    status, freshness, issues = reconcile_status(ch, _env(100.0), now=100.0)
+    assert any(i.kind is IssueKind.SKEW_SUSPECTED for i in issues)
+    assert freshness == 0.0  # max(0.0, now - la), never negative
+    assert status.kind is StatusKind.LIVE
+
+
 from runstate_tui.fold import read_value, read_elapsed
 
 
@@ -127,3 +137,28 @@ def test_status_fold_degrades_one_torn_factor_not_the_whole_row(torn_sqlite_chan
     row = status_fold(ch, _env(150.0))
     assert row.status.kind is not StatusKind.UNREADABLE      # NOT collapsed to unreadable
     assert any(i.kind is IssueKind.TORN for i in row.issues)  # the torn factor is surfaced
+
+
+def test_status_fold_degrades_a_torn_value_not_the_row(torn_sqlite_channel):
+    # a torn `value` record: value is lost + a Torn issue, but the live verdict survives
+    ch = torn_sqlite_channel([
+        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
+        ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
+    ], torn_seq=3)
+    row = status_fold(ch, _env(150.0, objective="loss"))
+    assert row.value is None
+    assert any(i.kind is IssueKind.TORN for i in row.issues)
+    assert row.status.kind is not StatusKind.UNREADABLE  # the run's verdict survives
+    assert row.status.kind is StatusKind.LIVE             # unaffected by the torn value
+
+
+def test_status_fold_degrades_a_torn_started_not_the_row(torn_sqlite_channel):
+    # a torn lifecycle.started (seq 1): elapsed is lost + a Torn issue, no crash
+    ch = torn_sqlite_channel([
+        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
+        ({"step": 3, "consumed_seq": 0, "t": 120.0}, "lifecycle.heartbeat", None),
+    ], torn_seq=1)
+    row = status_fold(ch, _env(150.0))
+    assert row.elapsed is None
+    assert any(i.kind is IssueKind.TORN for i in row.issues)

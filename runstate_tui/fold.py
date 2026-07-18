@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Callable
 
@@ -74,11 +75,13 @@ def read_value(channel: Channel, objective: str | None) -> tuple[str, object, in
 
 
 def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
-    started = channel.read(topics=[Topic.LIFECYCLE_STARTED], limit=1)
+    started, torn_issue = guarded(lambda ch: ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1), channel)
+    if torn_issue is not None:
+        return None, torn_issue  # a torn `started` never masquerades as "no started at all"
     if not started:
         return None, None
     t = started[0].body.get("t")
-    if not isinstance(t, (int, float)) or isinstance(t, bool):
+    if not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t):
         return None, None
     if t > now:
         return 0.0, Issue(
@@ -99,7 +102,10 @@ def status_fold(channel: Channel, env: Env) -> Row:
     if frontier_issue is not None:
         issues.append(frontier_issue)
 
-    value = read_value(channel, env.objective)
+    value, value_issue = guarded(lambda ch: read_value(ch, env.objective), channel)
+    if value_issue is not None:
+        issues.append(value_issue)
+
     elapsed, elapsed_issue = read_elapsed(channel, now)
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
