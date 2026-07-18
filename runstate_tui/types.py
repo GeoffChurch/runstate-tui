@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
+from runstate.channel import Envelope
 from runstate.observables import Outcome
 
 
@@ -113,6 +114,8 @@ class Row:
     value: tuple[str, object, int | None] | None  # (name, scalar, step)
     elapsed: float | None  # now - first started.t; None if no started
     episode: str | None  # latest_episode handle (PURE); None in Stage 0
+    undischarged_stops: tuple[Envelope, ...]
+    live_demand: tuple[Envelope, ...]
     issues: tuple[Issue, ...]
 
     @property

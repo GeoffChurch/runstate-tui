@@ -27,6 +27,36 @@ def build_log():
 
 
 @pytest.fixture
+def rich_run():
+    """A live run with an episode, a heartbeat, a value, an undischarged stop, and
+    live demand. Built directly (not via build_log) because control.subscribe /
+    control.stop correlate on request_id, which build_log's (body, topic, name)
+    triples have no slot for."""
+    opened = []  # every channel handle this fixture opens, closed in teardown below
+
+    def _build():
+        run_id = f"rich-{next(_ids)}"
+        writer = open_channel(run_id, backend="memory")
+        opened.append(writer)
+        writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
+        writer.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
+        writer.send({"value": 0.03, "step": 7, "t": 140.0}, topic="value", name="loss")
+        writer.send(
+            {"schedule": {}, "names": ["loss"]},
+            topic="control.subscribe",
+            request_id="webui:sub1",
+        )
+        writer.send({}, topic="control.stop", request_id="webui:stop1")
+        reader = open_channel(run_id, backend="memory")  # a fresh reader on the same log
+        opened.append(reader)
+        return reader
+
+    yield _build
+    for channel in opened:
+        channel.close()
+
+
+@pytest.fixture
 def torn_sqlite_channel(tmp_path):
     opened = []  # every channel handle this fixture opens, closed in teardown below
 

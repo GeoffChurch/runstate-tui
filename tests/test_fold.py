@@ -133,6 +133,15 @@ def test_status_fold_on_a_healthy_live_run(build_log):
     assert row.issues == ()
 
 
+def test_status_fold_populates_episode_stops_and_demand(rich_run):
+    row = status_fold(rich_run(), _env(150.0, objective="loss"))
+    assert row.episode == "local://h/1"
+    assert len(row.undischarged_stops) == 1
+    assert row.undischarged_stops[0].topic == "control.stop"
+    assert len(row.live_demand) == 1
+    assert row.live_demand[0].topic == "control.subscribe"
+
+
 def test_status_fold_lets_byte_torn_propagate(torn_sqlite_channel):
     # a byte-torn record anywhere in the log crashes the fold (no granular degradation
     # for corruption): the first read that decodes it raises.

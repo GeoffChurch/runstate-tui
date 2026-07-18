@@ -5,7 +5,15 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from runstate.channel import Channel
-from runstate.observables import MalformedRecordError, last_activity, peek_terminal, progress
+from runstate.observables import (
+    MalformedRecordError,
+    last_activity,
+    latest_episode,
+    live_demand,
+    peek_terminal,
+    progress,
+    undischarged_stops,
+)
 from runstate.vocabulary.payloads import Topic
 
 from .env import Env, Liveness, resolve_liveness
@@ -109,12 +117,27 @@ def status_fold(channel: Channel, env: Env) -> Row:
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
+    episode_env, episode_issue = guarded(latest_episode, channel)
+    episode = episode_env.body.get("handle") if episode_env is not None else None
+    if episode_issue is not None:
+        issues.append(episode_issue)
+
+    stops, stops_issue = guarded(undischarged_stops, channel)
+    if stops_issue is not None:
+        issues.append(stops_issue)
+
+    demand, demand_issue = guarded(live_demand, channel)
+    if demand_issue is not None:
+        issues.append(demand_issue)
+
     return Row(
         status=status,
         frontier=frontier,
         freshness=freshness,
         value=value,
         elapsed=elapsed,
-        episode=None,
+        episode=episode,
+        undischarged_stops=tuple(stops or ()),
+        live_demand=tuple(demand or ()),
         issues=tuple(issues),
     )

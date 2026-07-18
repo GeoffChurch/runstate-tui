@@ -58,6 +58,8 @@ def _bare_row(**kw):
         value=None,
         elapsed=5.0,
         episode=None,
+        undischarged_stops=(),
+        live_demand=(),
         issues=(),
     )
     base.update(kw)

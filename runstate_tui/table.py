@@ -22,6 +22,8 @@ def _bare(status: Status) -> Row:
         value=None,
         elapsed=None,
         episode=None,
+        undischarged_stops=(),
+        live_demand=(),
         issues=(),
     )
 
