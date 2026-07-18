@@ -217,13 +217,14 @@ def test_embedded_newline_splits(tmp_path):
 
 
 async def _embedded_newline_splits(tmp_path):
-    # FINDING: format_envelope should defensively single-line its output. A normal
-    # dict body's string values are `repr()`'d as part of `str(dict)` (an embedded
-    # "\n" prints as the two literal characters backslash-n), but an alien NON-dict
-    # body -- e.g. a bare JSON string, planted here via corrupt_seq -- is interpolated
-    # RAW (`f"...{env.body}"`, no repr()): a real embedded newline character survives
-    # into the formatted line and RichLog.write splits it into multiple physical
-    # lines for what is really ONE envelope.
+    # format_envelope single-lines its output. A normal dict body's string values
+    # are `repr()`'d as part of `str(dict)` (an embedded "\n" prints as the two
+    # literal characters backslash-n), but an alien NON-dict body -- e.g. a bare
+    # JSON string, planted here via corrupt_seq -- would otherwise be interpolated
+    # RAW (`f"...{env.body}"`, no repr()): a real embedded newline character would
+    # survive into the formatted line and RichLog.write would split it into
+    # multiple physical lines for what is really ONE envelope. format_envelope
+    # escapes \n/\r/\t so this can't happen: one envelope is always one line.
     ref = _sqlite_run(tmp_path, "nl", [({"handle": "h1", "t": 1.0}, "launcher.launched", None)])
     corrupt_seq(tmp_path, "nl", 1, literal=json.dumps("line one\nline two"))
     app = _Host()
@@ -232,11 +233,10 @@ async def _embedded_newline_splits(tmp_path):
         await app.push_screen(screen)
         await _settle(pilot, screen)
         lines = _log(screen)
-        # ONE envelope on the log, but its embedded newline splits it into >1
-        # physical RichLog line -- exactly the defect the FINDING above names.
-        assert len(lines) > 1
-        assert any("line one" in line for line in lines)
-        assert any("line two" in line for line in lines)
+        # ONE envelope on the log renders as exactly ONE physical RichLog line --
+        # the embedded newline is escaped, not raw, so it can't split the line.
+        assert len(lines) == 1
+        assert "line one\\nline two" in lines[0]
 
 
 # --- fold-visibility of the raw tail ------------------------------------------------

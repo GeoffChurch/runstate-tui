@@ -111,8 +111,9 @@ def test_terminal_superseded_by_new_episode(build_log):
 
 def test_terminal_errored_via_stopped(build_log):
     # completed=False + error="OOM" -> Outcome.ERRORED. peek_terminal returns a
-    # RunResult carrying `.error`, but status_fold only threads `.outcome` into
-    # Status.terminal(...) -- the error text itself is dropped, nowhere on the Row.
+    # RunResult carrying `.error`, and status_fold now threads it through as
+    # Status.terminal(outcome, detail=result.error) -- the error text is retained
+    # on the Row (faithful-representation: the diagnostic is not dropped).
     ch = build_log(
         [
             ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
@@ -125,8 +126,7 @@ def test_terminal_errored_via_stopped(build_log):
     )
     row = status_fold(ch, _env(10.0))
     assert row.status.kind is StatusKind.TERMINAL and row.status.outcome is Outcome.ERRORED
-    # FINDING: RunResult.error diagnostic is dropped -- Status.terminal() only threads .outcome
-    assert "OOM" not in repr(row)  # the error string is nowhere on the Row
+    assert row.status.detail == "OOM"  # the error string is retained on the Row
 
 
 def test_error_empty_string_is_errored(build_log):
@@ -520,3 +520,50 @@ def test_out_of_order_t_seq_latest_wins(build_log):
     assert row.frontier == 9  # progress() reads ONLY the latest (seq3) heartbeat's step
     assert row.freshness == 50.0  # now(250) - la(200, seq3's t) -- NOT now - 300
     assert row.issues == ()
+
+
+def test_undischarged_stop_spans_episode(build_log):
+    # Episode-scoped undischarged_stops: a stop filed against the FIRST episode,
+    # never discharged by a stopped, is a stale "ghost" once a SECOND episode
+    # (relaunch) has started -- status_fold now anchors stops to the current
+    # episode's seq and drops anything at or before it. Control: a stop filed
+    # AFTER the current episode's started IS still present (not over-filtered).
+    ch = build_log(
+        [
+            ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
+            ({}, "control.stop", None, "webui:ghost"),
+            ({"handle": "h2", "t": 5.0}, "lifecycle.started", None),
+            ({}, "control.stop", None, "webui:current"),
+        ]
+    )
+    row = status_fold(ch, _env(10.0))
+    assert row.episode == "h2"  # a fresh, live episode with no stop of its own
+    assert len(row.undischarged_stops) == 1  # only the post-started stop survives
+    assert row.undischarged_stops[0].request_id == "webui:current"
+
+
+def test_undischarged_stop_before_any_episode_still_present(build_log):
+    # No lifecycle.started at all -- episode_seq is None, so the episode-scope
+    # filter is a no-op and a stop with nothing to anchor against still shows.
+    ch = build_log([({}, "control.stop", None, "webui:preepisode")])
+    row = status_fold(ch, _env(10.0))
+    assert row.episode is None
+    assert len(row.undischarged_stops) == 1
+    assert row.undischarged_stops[0].request_id == "webui:preepisode"
+
+
+def test_stopped_error_detail_retained_on_row(build_log):
+    # Faithful-representation: RunResult.error survives onto the Row's status,
+    # not just the closed Outcome -- the operator-facing diagnostic text.
+    ch = build_log(
+        [
+            ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
+            (
+                {"completed": False, "error": "OOM killed", "final_step": None, "t": 2.0},
+                "lifecycle.stopped",
+                None,
+            ),
+        ]
+    )
+    row = status_fold(ch, _env(10.0))
+    assert row.status.detail == "OOM killed"

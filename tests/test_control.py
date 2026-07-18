@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 
+import pytest
 from runstate import open_channel
 from runstate.vocabulary.payloads import Heartbeat, Nak, Started, Stopped, Topic
 
 from runstate_tui.control import StopOutcome, StopResult, dispatch_stop, stop_run
 from runstate_tui.types import Severity
+from tests.helpers import corrupt_seq
 
 
 def _run(tmp_path: Path, run_id: str):
@@ -85,6 +88,74 @@ def test_stop_run_unsafe_on_timeout(tmp_path):
         )
         assert outcome.result is StopResult.UNSAFE
         assert outcome.severity is Severity.HIGH
+    finally:
+        ch.close()
+
+
+def test_stop_run_moot_when_already_ended_no_control_stop_appended(tmp_path):
+    ch = _run(tmp_path, "already-ended")
+    try:
+        ch.send(asdict(Started(handle="h", t=1.0)), topic=Topic.LIFECYCLE_STARTED)
+        ch.send(
+            asdict(Stopped(completed=True, error=None, final_step=3, t=2.0)),
+            topic=Topic.LIFECYCLE_STOPPED,
+        )
+        outcome = stop_run(ch, request_id="webui:moot", timeout=1.0, sleep=lambda _s: None)
+        assert outcome.result is StopResult.MOOT
+        assert outcome.detail == "run already ended (completed)"
+        assert ch.read(topics=[Topic.CONTROL_STOP]) == []  # never sent
+    finally:
+        ch.close()
+
+
+def test_already_ended_malformed_terminal_degrades_to_none_not_moot(tmp_path):
+    # A decodable-but-wrong-shape lifecycle.stopped (missing error/final_step/t)
+    # makes peek_terminal raise MalformedRecordError -- _already_ended can't
+    # confirm the run ended from that, so it degrades to None and stop_run
+    # proceeds to send as normal (never MOOT). No worker answers -> UNSAFE.
+    ch = _run(tmp_path, "malformed-terminal")
+    try:
+        ch.send({"completed": True}, topic=Topic.LIFECYCLE_STOPPED)
+        ticks = iter([100.0, 100.0, 101.0, 102.0, 103.0, 104.0])
+        outcome = stop_run(
+            ch,
+            request_id="webui:malformed",
+            timeout=1.0,
+            now=lambda: next(ticks),
+            sleep=lambda _s: None,
+        )
+        assert outcome.result is StopResult.UNSAFE
+        assert outcome.result is not StopResult.MOOT
+    finally:
+        ch.close()
+
+
+def test_stop_run_byte_torn_terminal_propagates(tmp_path):
+    # A byte-torn body (undecodable JSON) on the terminal record must NOT be
+    # swallowed by _already_ended's MalformedRecordError catch -- it's a
+    # different, uncatchable class (json.JSONDecodeError), consistent with the
+    # corrupt taxonomy elsewhere (fold.py's locate_torn_seq / guarded()).
+    writer = _run(tmp_path, "byte-torn-terminal")
+    seq = writer.send(
+        asdict(Stopped(completed=True, error=None, final_step=3, t=2.0)),
+        topic=Topic.LIFECYCLE_STOPPED,
+    )
+    writer.close()
+    corrupt_seq(tmp_path, "byte-torn-terminal", seq)
+    ch = _run(tmp_path, "byte-torn-terminal")
+    try:
+        before = len(ch.read(topics=[Topic.CONTROL_STOP]))
+        with pytest.raises(json.JSONDecodeError):
+            stop_run(ch, request_id="webui:torn", timeout=1.0, sleep=lambda _s: None)
+        # Pin that the crash fires BEFORE any control.stop is written -- not just
+        # that SOME JSONDecodeError eventually surfaces. Without this, a future
+        # widening of _already_ended's `except MalformedRecordError` to `except
+        # Exception` would swallow the byte-torn, proceed to channel.send (durably
+        # writing a pointless control.stop into the corrupt log), and only THEN
+        # crash in await_consumed -- still satisfying pytest.raises(...) by
+        # accident, undetected.
+        after = len(ch.read(topics=[Topic.CONTROL_STOP]))
+        assert after == before == 0  # no control.stop was ever appended
     finally:
         ch.close()
 

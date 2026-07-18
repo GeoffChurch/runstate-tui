@@ -95,7 +95,9 @@ def reconcile_status(
         )
 
     if result is not None:
-        return Status.terminal(result.outcome), freshness, issues  # terminal wins
+        # terminal wins; result.error is the operator-facing diagnostic (None
+        # for a clean stop) -- retained on Status, not just the closed outcome
+        return Status.terminal(result.outcome, detail=result.error), freshness, issues
     if la is None:
         return Status.pending(), freshness, issues  # no dated activity at all
     verdict = resolve_liveness(channel, env, now, la)
@@ -154,18 +156,27 @@ def status_fold(channel: Channel, env: Env) -> Row:
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
-    def _episode_handle(ch: Channel) -> str | None:
-        started_env = latest_episode(ch)
-        # alien non-dict body -> AttributeError here -> caught by guarded() below
-        return started_env.body.get("handle") if started_env is not None else None
+    def _episode(ch: Channel) -> tuple[int, str | None] | None:
+        env = latest_episode(ch)
+        if env is None:
+            return None
+        # .body.get can hit an alien non-dict body -> AttributeError -> caught by guarded() below
+        return (env.seq, env.body.get("handle"))
 
-    episode, episode_issue = guarded(_episode_handle, channel)
+    episode_info, episode_issue = guarded(_episode, channel)
     if episode_issue is not None:
         issues.append(episode_issue)
+    episode_seq = episode_info[0] if episode_info is not None else None
+    episode = episode_info[1] if episode_info is not None else None
 
     stops, stops_issue = guarded(undischarged_stops, channel)
     if stops_issue is not None:
         issues.append(stops_issue)
+    if stops is not None and episode_seq is not None:
+        # episode-scope: a stop filed against a PRIOR episode, never discharged,
+        # is a stale ghost on a fresh relaunch -- drop anything at/before the
+        # current episode's started seq.
+        stops = [s for s in stops if s.seq > episode_seq]
 
     demand, demand_issue = guarded(live_demand, channel)
     if demand_issue is not None:

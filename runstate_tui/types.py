@@ -67,6 +67,7 @@ _STATUS_SEVERITY = {
 class Status:
     kind: StatusKind
     outcome: Outcome | None = None  # set iff kind is TERMINAL
+    detail: str | None = None  # optional diagnostic text (e.g. a terminal RunResult.error)
 
     @classmethod
     def pending(cls) -> Status:
@@ -97,8 +98,8 @@ class Status:
         return cls(StatusKind.CORRUPT)
 
     @classmethod
-    def terminal(cls, outcome: Outcome) -> Status:
-        return cls(StatusKind.TERMINAL, outcome)
+    def terminal(cls, outcome: Outcome, detail: str | None = None) -> Status:
+        return cls(StatusKind.TERMINAL, outcome, detail=detail)
 
     @property
     def label(self) -> str:
