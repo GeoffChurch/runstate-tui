@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-RunRef = tuple[str, str, str]          # (run_id, root, backend) — open_channel's three inputs
+RunRef = tuple[str, str, str]  # (run_id, root, backend) — open_channel's three inputs
 Resolver = Callable[[float], list[RunRef]]  # Time -> IndexSet (re-resolved each frame)
 
 
