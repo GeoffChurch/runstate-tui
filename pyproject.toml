@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 dependencies = ["runstate"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff", "mypy", "pytest-cov"]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -14,5 +14,25 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["runstate_tui"]
 
+[tool.uv.sources]
+runstate = { git = "https://github.com/GeoffChurch/runstate", branch = "master" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["runstate_tui"]
+strict = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=runstate_tui --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["runstate_tui"]
+branch = true
