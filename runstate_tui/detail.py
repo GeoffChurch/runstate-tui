@@ -47,12 +47,11 @@ class DrillDownScreen(Screen[None]):
     from a bounded in-memory window (`log_view = window ∘ filter ∘ read`, spec
     2026-07-19-drilldown-redesign-design.md). `escape` returns.
 
-    This task (Task 3 of the drill-down redesign) builds the shell + `_render_window`;
-    `_tick` here is a single synchronous fill (read everything after 0 into the window,
-    render once) so the table renders for the test. Task 4 replaces `_refresh`'s body
-    with the incremental delta-cursor live-tail worker (+ reschedule loop) that keeps
-    `self._window`/`self._cursor` growing tick-over-tick -- the fields already exist so
-    that swap touches no other state."""
+    `_refresh` is an incremental delta-cursor live-tail worker that self-reschedules:
+    each tick re-folds the card (pure), then reads only the RAW tail since
+    `self._cursor` (`read_log_delta(after=self._cursor)`), extends the bounded window
+    (`deque(maxlen=log_cap)` trims the front), and advances the cursor to the delta's
+    last seq -- never re-reading what's already been drained."""
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
@@ -151,20 +150,22 @@ class DrillDownScreen(Screen[None]):
 
     @work(thread=True, exclusive=True)
     def _refresh(self) -> None:
-        # no `is_mounted` guard here: this task's fill runs exactly once (no
-        # self-reschedule, see class docstring) -- a pop mid-fill can only race the
-        # _marshal calls below onto a torn-down screen, which _marshal already guards
-        # (_TEARDOWN_ERRORS). card: the Row, re-folded off-thread -- byte-torn now
-        # surfaces as a loud `corrupt` card, not a crash, so there is no exception to
-        # race a pop.
+        # no `is_mounted` guard here: a pop mid-tick can only race the _marshal calls
+        # below onto a torn-down screen, which _marshal already guards
+        # (_TEARDOWN_ERRORS) -- including the final self-reschedule, so a popped screen
+        # simply stops ticking rather than raising.
+        # card: the Row, re-folded off-thread each tick (pure) -- byte-torn surfaces as
+        # a loud `corrupt` card, not a crash.
         row = render_single(self._ref, self._env)
         self._marshal(self._show_card, format_summary_card(row))
-        # Task 3: a single synchronous fill (not yet the incremental live-tail --
-        # Task 4 replaces this with a delta-cursor read + reschedule loop). Still
-        # off-thread + _TEARDOWN_ERRORS-guarded like every other fold/read worker here.
-        envelopes = read_log_delta(self._ref, after=0)
-        self._window.clear()
-        self._window.extend(envelopes)
-        if envelopes:
-            self._cursor = envelopes[-1].seq
-        self._marshal(self._render_window)
+        # log: incremental raw delta (unfiltered accumulation -> clean cursor); the
+        # filter is applied in _render_window over the bounded window.
+        # UPSTREAM(runstate#15): when the substrate filters + supports backward reads,
+        # pass filter=self._predicate() here (true retroactive filtering); v1 accumulates
+        # raw and filters the window in _render_window. grep -rn "UPSTREAM(runstate#15)"
+        delta = read_log_delta(self._ref, after=self._cursor)
+        if delta:
+            self._window.extend(delta)  # oldest..newest; deque(maxlen) trims the front
+            self._cursor = delta[-1].seq
+            self._marshal(self._render_window)
+        self._marshal(self.set_timer, self._tick_interval, self._tick)

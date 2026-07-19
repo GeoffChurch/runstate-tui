@@ -12,6 +12,7 @@ from runstate_tui import detail as detail_module
 from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
 from runstate_tui.format import topic_color
+from tests.helpers import advance_tick
 
 
 def _seed_rich(tmp_path):
@@ -209,3 +210,34 @@ async def _pop_mid_tick(tmp_path, monkeypatch):
         await pilot.app.pop_screen()  # pop WHILE render_single is still blocked mid-tick
         release.set()  # let the in-flight tick proceed -> its _marshal calls now race the pop
         await pilot.pause(0.3)  # give the worker thread time to finish and marshal (or not crash)
+
+
+def test_live_tail_appends_at_top_incrementally(tmp_path):
+    # Task 4's core: the incremental delta-cursor live-tail worker (not T3's interim
+    # synchronous full-fill) -- a fresh append on a HELD writer appears at the TOP of
+    # the log table on the very next manual tick, and the table stays bounded to
+    # exactly what's been drained so far (not the whole log re-read each time).
+    asyncio.run(_live_tail(tmp_path))
+
+
+async def _live_tail(tmp_path):
+    ref = ("live", str(tmp_path), "sqlite")
+    w = open_channel("live", root=tmp_path, backend="sqlite")
+    w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    app = _HostApp(ref, tick_interval=999.0)
+    async with app.run_test(size=(90, 22)) as pilot:
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        await pilot.pause()
+        await pilot.app.workers.wait_for_complete()  # settle the automatic on_mount tick
+        t = screen.query_one("#detail-log", DataTable)
+        assert t.get_cell_at(Coordinate(0, 0)) == "1"
+        assert t.row_count == 1
+        assert screen._cursor == 1
+
+        w.send({"step": 5, "consumed_seq": 0, "t": 2.0}, topic="lifecycle.heartbeat")
+        await advance_tick(pilot, screen)
+        assert t.get_cell_at(Coordinate(0, 0)) == "2"  # newest (seq 2) now on TOP
+        assert t.row_count == 2
+        assert screen._cursor == 2
+    w.close()
