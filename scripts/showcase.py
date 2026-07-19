@@ -113,7 +113,9 @@ async def scene_table(out_dir: Path) -> Path:
         t = pilot.app.query_one("#runs")  # type: ignore[attr-defined]
         t.cursor_type = "none"
 
-    return await capture(app, out_dir / "table.png", before=before, title="runstate-tui — sweep")
+    return await capture(
+        app, out_dir / "table.png", size=(108, 10), before=before, title="runstate-tui — sweep"
+    )
 
 
 async def scene_single(out_dir: Path) -> Path:
@@ -125,7 +127,9 @@ async def scene_single(out_dir: Path) -> Path:
     c.close()
     ref: RunRef = ("train-mnist", str(root), "sqlite")
     app = SingleRunApp(ref, Env(clock=lambda: NOW, objective="loss"), tick_interval=999)
-    return await capture(app, out_dir / "single.png", title="runstate-tui — single run")
+    return await capture(
+        app, out_dir / "single.png", size=(104, 4), title="runstate-tui — single run"
+    )
 
 
 async def scene_integrity(out_dir: Path) -> Path:
@@ -166,7 +170,11 @@ async def scene_integrity(out_dir: Path) -> Path:
         t.cursor_type = "none"
 
     return await capture(
-        app, out_dir / "integrity.png", before=before, title="runstate-tui — integrity"
+        app,
+        out_dir / "integrity.png",
+        size=(106, 8),
+        before=before,
+        title="runstate-tui — integrity",
     )
 
 
@@ -190,7 +198,11 @@ async def scene_drilldown(out_dir: Path) -> Path:
         await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
 
     return await capture(
-        app, out_dir / "drilldown.png", before=before, title="runstate-tui — drill-down"
+        app,
+        out_dir / "drilldown.png",
+        size=(108, 16),
+        before=before,
+        title="runstate-tui — drill-down",
     )
 
 
@@ -207,7 +219,9 @@ async def scene_stop(out_dir: Path) -> Path:
     async def before(pilot: object) -> None:  # `s` -> the confirm-stop gate
         await pilot.press("s")  # type: ignore[attr-defined]
 
-    return await capture(app, out_dir / "stop.png", before=before, title="runstate-tui — stop")
+    return await capture(
+        app, out_dir / "stop.png", size=(104, 4), before=before, title="runstate-tui — stop"
+    )
 
 
 SCENES: dict[str, Callable[[Path], Awaitable[Path]]] = {

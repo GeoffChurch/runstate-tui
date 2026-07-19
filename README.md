@@ -4,6 +4,28 @@ A **control-plane cockpit** for [runstate](https://github.com/GeoffChurch/runsta
 a terminal UI that answers *"what is happening / what happened"* across groups of runs,
 and lets you act on one. **No plots.**
 
+## Screens
+
+The multi-run table — the whole sweep at a glance (a `●` traffic-light per run):
+
+![multi-run table](docs/img/table.png)
+
+A single run, focused:
+
+![single run](docs/img/single.png)
+
+The integrity taxonomy — a bad run is a loud row, never a crash:
+
+![integrity taxonomy](docs/img/integrity.png)
+
+The drill-down — episodes, undischarged stops, live demand, raw envelope tail:
+
+![drill-down](docs/img/drilldown.png)
+
+The confirm-gated stop, so `s` never fires by accident:
+
+![stop confirm](docs/img/stop.png)
+
 ## What it is — and what it deliberately isn't
 
 It shows only what runstate **uniquely knows** — the terminal verdict (`peek_terminal`),
