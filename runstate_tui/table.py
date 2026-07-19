@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from runstate import open_channel
-from runstate.channel import Envelope
+from runstate.channel import Channel, Envelope
 
 from .env import Env
 from .fold import locate_torn_seq, status_fold
@@ -48,6 +48,50 @@ def _corrupt(seq: int | None) -> Row:
     )
 
 
+def _fold_error(exc: Exception) -> Row:
+    """A row for an UNEXPECTED exception escaping the fold — i.e. a genuine internal bug on
+    ONE run. Every EXPECTED fold failure is already its own loud row: missing/unreadable
+    (`_bare`), byte-torn (`_corrupt`), malformed record (a per-factor Issue). Containing the
+    escaped exception to a distinct HIGH `error` row (NOT reused `unreadable`/`corrupt`,
+    which would be lossy) keeps the table alive while the worker stays fail-fast for
+    catastrophic non-fold bugs. The exception rides both the status detail and the Issue
+    message so it surfaces in the table's status column AND the drill-down's issue list."""
+    detail = f"{type(exc).__name__}: {exc}"
+    # IssueKind.INTERNAL_ERROR: our CODE threw an unexpected exception -- distinct from
+    # MALFORMED (a decodable-but-wrong-shape DATA record) and CORRUPT (a byte-torn log at
+    # a known seq). The kind is an internal tag (never displayed — only `message` renders),
+    # but it is consumed programmatically, so it must stay faithful to its own category.
+    issue = Issue(
+        kind=IssueKind.INTERNAL_ERROR,
+        severity=Severity.HIGH,
+        message=f"unexpected fold error: {detail}",
+    )
+    return Row(
+        status=Status.error(detail=detail),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(),
+        live_demand=(),
+        issues=(issue,),
+    )
+
+
+def fold_open_channel(channel: Channel, env: Env) -> Row:
+    """Fold an ALREADY-OPEN channel with the integrity guards, WITHOUT closing it.
+    A byte-torn (json.JSONDecodeError) -> loud `corrupt` carrying the located seq; a
+    substrate fault mid-read -> `unreadable`. open_and_fold closes in its own finally;
+    the pool keeps the handle and re-uses it next tick (folding fresh)."""
+    try:
+        return status_fold(channel, env)
+    except json.JSONDecodeError:
+        return _corrupt(locate_torn_seq(channel))
+    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
+        return _bare(Status.unreadable())
+
+
 def open_and_fold(ref: RunRef, env: Env) -> Row:
     run_id, root, backend = ref
     # stat-before-open (sqlite): a missing pointer must NOT open_channel (that would
@@ -66,15 +110,7 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
     except _OPEN_ERRORS:
         return _bare(Status.unreadable())  # corrupt/foreign/unopenable db
     try:
-        return status_fold(channel, env)
-    except json.JSONDecodeError:
-        # byte-torn (an atomicity violation): NOT unreadable (that would be lossy) and
-        # NOT a crash — a distinct, loud `corrupt` status carrying the located seq.
-        return _corrupt(locate_torn_seq(channel))
-    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
-        return _bare(Status.unreadable())  # substrate fault mid-read (a corrupt db
-        # fails every read); json.JSONDecodeError is caught above, not here — it is
-        # not a subclass of sqlite3.DatabaseError/OSError, so order is for clarity.
+        return fold_open_channel(channel, env)
     finally:
         channel.close()
 
