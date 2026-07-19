@@ -77,7 +77,7 @@ def test_format_row_flags_undischarged_stops():
 
     stop = Envelope(seq=5, topic="control.stop", name=None, request_id="webui:s", body={})
     text = format_row(_row(frontier=3, undischarged_stops=(stop,)))
-    assert "⏹1" in text
+    assert "■1" in text
 
 
 def test_format_envelope_is_a_compact_one_liner():
@@ -162,3 +162,17 @@ def test_format_detail_shows_terminal_error_diagnostic():
     row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
     text = format_detail(row)
     assert "errored: OOM killed" in text
+
+
+def test_status_color_maps_kinds_and_outcomes():
+    from runstate_tui.format import status_color
+
+    assert status_color(Status.live()) == "#3fb950"
+    assert status_color(Status.stale()) == "#d29922"
+    assert status_color(Status.pending()) == "#8b949e"
+    assert status_color(Status.missing()) == "#8b949e"
+    assert status_color(Status.corrupt()) == "#f85149"
+    assert status_color(Status.unreadable()) == "#f85149"
+    assert status_color(Status.error()) == "#f85149"
+    assert status_color(Status.terminal(Outcome.COMPLETED)) == "#539bf5"
+    assert status_color(Status.terminal(Outcome.ERRORED)) == "#f85149"

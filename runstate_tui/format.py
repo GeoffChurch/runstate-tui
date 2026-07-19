@@ -1,8 +1,38 @@
 from __future__ import annotations
 
 from runstate.channel import Envelope
+from runstate.observables import Outcome
 
-from .types import Row
+from .types import Row, Status, StatusKind
+
+_STATUS_COLORS = {
+    StatusKind.LIVE: "#3fb950",
+    StatusKind.STALE: "#d29922",
+    StatusKind.PENDING: "#8b949e",
+    StatusKind.MISSING: "#8b949e",
+    StatusKind.CORRUPT: "#f85149",
+    StatusKind.UNREADABLE: "#f85149",
+    StatusKind.ERROR: "#f85149",
+    StatusKind.CONFLICTED: "#d29922",
+}
+_OUTCOME_COLORS = {
+    Outcome.COMPLETED: "#539bf5",
+    Outcome.PREEMPTED: "#d29922",
+    Outcome.ERRORED: "#f85149",
+    Outcome.KILLED: "#f85149",
+    Outcome.PRESUMED_DEAD: "#f85149",
+}
+
+
+def status_color(status: Status) -> str:
+    """A truecolor HEX for a status — the traffic-light dot. Redundant with the
+    text label (never the sole signal). Keyed on StatusKind, refined by terminal
+    Outcome. HEX (not Rich/ANSI color names) so the palette renders faithfully
+    instead of being bent by a terminal's ANSI theme (e.g. `blue` -> purple,
+    `yellow` -> amber on some themes)."""
+    if status.kind is StatusKind.TERMINAL and status.outcome is not None:
+        return _OUTCOME_COLORS.get(status.outcome, "#8b949e")
+    return _STATUS_COLORS.get(status.kind, "#8b949e")
 
 
 def format_row(row: Row) -> str:
@@ -21,7 +51,7 @@ def format_row(row: Row) -> str:
     if row.elapsed is not None:
         parts.append(f"ran {row.elapsed:.0f}s")
     if row.undischarged_stops:
-        parts.append(f"⏹{len(row.undischarged_stops)}")
+        parts.append(f"■{len(row.undischarged_stops)}")
     for issue in row.issues:
         parts.append(f"⚠ {issue.message}")
     return "  ".join(parts)

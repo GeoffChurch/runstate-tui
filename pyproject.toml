@@ -11,7 +11,7 @@ dependencies = [
 runstate-tui = "runstate_tui.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff", "mypy", "pytest-cov"]
+dev = ["pytest>=8", "ruff", "mypy", "pytest-cov", "cairosvg"]
 
 [build-system]
 requires = ["setuptools>=68"]

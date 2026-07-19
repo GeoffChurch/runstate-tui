@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 
+from rich.text import Span
 from runstate import open_channel
 from textual.widgets import DataTable, Static
 
@@ -343,6 +344,101 @@ async def _watchdog_banner_shows_on_a_first_frame_wedge(gate):
     # also lets asyncio.run()'s own executor-shutdown return promptly instead of
     # blocking on the still-running thread for its full internal bound.
     gate.set()
+
+
+def test_table_has_a_colored_status_dot(tmp_path):
+    asyncio.run(_table_has_a_colored_status_dot(tmp_path))
+
+
+async def _table_has_a_colored_status_dot(tmp_path):
+    # The leading `dot` column is a redundant traffic-light: a Rich Text "●" styled
+    # via status_color(row.status) -- never the sole signal (the text status column
+    # still carries the label). A live run's dot must be green.
+    ref = _seed(tmp_path, "a")  # a live run under the fixed clock
+    app = MultiRunApp(explicit_resolver([ref]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        cell = t.get_cell(ref_key(ref), "dot")  # the stored Rich Text, unconverted
+        assert "●" in cell.plain and cell.style == "#3fb950"
+
+
+def test_marker_corrupt_row_is_double_warning_colored_red():
+    # The clean split: `_marker` keys on ISSUE severity + stop count ONLY, never
+    # row.severity/status severity -- the `dot` cell already carries status color.
+    # `_corrupt` plants a HIGH Issue, so a corrupt row still gets the loud ⚠⚠, colored
+    # to match the dot's red.
+    from runstate_tui.multirun import _marker
+    from runstate_tui.table import _corrupt
+
+    marker = _marker(_corrupt(seq=1))
+    assert marker.plain == "⚠⚠"
+    assert marker.style == "#f85149"
+
+
+def test_marker_unreadable_row_is_empty_the_dot_carries_it_alone():
+    # Pins the clean split's other half: `_bare` rows (missing/unreadable) carry
+    # issues=() -- no Issue at all -- so under the new issue-severity-only keying they
+    # get NO `!` marker. Before the split, row.severity (which folds in STATUS
+    # severity too) would have shown ⚠⚠ here, restating what the red dot already says.
+    from runstate_tui.multirun import _marker
+    from runstate_tui.table import _bare
+    from runstate_tui.types import Status
+
+    marker = _marker(_bare(Status.unreadable()))
+    assert marker.plain == ""
+
+
+def test_marker_malformed_row_is_single_warning_colored_amber():
+    # Pins the MEDIUM-severity branch: a single Issue below HIGH but at/above MEDIUM
+    # gets the quieter single ⚠, colored amber -- distinct from the HIGH ⚠⚠ red and
+    # from the no-issue empty/neutral cases pinned above.
+    from runstate_tui.multirun import _marker
+    from runstate_tui.types import Issue, IssueKind, Row, Severity, Status
+
+    row = Row(
+        status=Status.live(),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(),
+        live_demand=(),
+        issues=(
+            Issue(kind=IssueKind.MALFORMED, severity=Severity.MEDIUM, message="record malformed"),
+        ),
+    )
+    marker = _marker(row)
+    assert marker.plain == "⚠"
+    assert marker.style == "#d29922"
+
+
+def test_marker_undischarged_stop_alone_renders_neutral():
+    # A stop with no issue: the ■N badge must NOT inherit any severity color -- it is
+    # an orthogonal axis, always neutral/default-colored regardless of what precedes it.
+    from runstate.channel import Envelope
+
+    from runstate_tui.multirun import _marker
+    from runstate_tui.types import Row, Status
+
+    stop = Envelope(seq=5, topic="control.stop", name=None, request_id="webui:s", body={})
+    row = Row(
+        status=Status.live(),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(stop,),
+        live_demand=(),
+        issues=(),
+    )
+    marker = _marker(row)
+    assert marker.plain == "■1"
+    assert marker.style == ""  # no base color
+    assert marker.spans == [Span(0, len("■1"), "default")]  # explicit neutral override
 
 
 def test_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
