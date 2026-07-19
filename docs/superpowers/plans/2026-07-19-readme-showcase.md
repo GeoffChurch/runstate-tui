@@ -14,6 +14,7 @@ Copied from the spec (`docs/superpowers/specs/2026-07-19-readme-showcase-design.
 
 - **Static PNGs only** this cut; GIFs/animated usage DEFERRED. No pixel-diff CI gate (the generator running without error is the smoke-test value).
 - **Determinism:** every scene uses an injected fixed clock (`Env(clock=lambda: NOW)`), a fixed `run_test(size=(W,H))`, and seeded logs at controlled `t`s. `NOW` is chosen relative to the seeded `t`s (`stuck_threshold=60`: `NOW-20` → `live`, `NOW-120` → `stale`).
+- **Async test harness — NO `pytest-asyncio`** in this repo. Do NOT use `@pytest.mark.asyncio` / `async def test_` (it silently no-ops → a vacuous pass). Use a sync wrapper calling `asyncio.run` on an async helper, exactly like `tests/test_multirun.py`: `def test_x(tmp_path): asyncio.run(_x(tmp_path))` + `async def _x(...): async with app.run_test() as pilot: ...`.
 - **Color is redundant, never the sole signal** (CVD / `NO_COLOR` / piped output degrade to the text status). The `●` dot reinforces the existing status text.
 - **Glyphs (spike-verified through cairosvg):** stop badge is `■` (U+25A0), NOT `⏹`. Status dot is `●` (U+25CF) colored via a Rich style (renders as an SVG `fill`). Do NOT use emoji circles (`🔴🟢🟡` — newer, emoji-font-dependent, tofu in cairosvg).
 - **Status→color map** (keyed on `StatusKind` + terminal `Outcome`): green `live` · yellow(amber) `stale`/`preempted` · grey `pending`/`missing` · red `corrupt`/`unreadable`/`fold-error`(=`StatusKind.ERROR`)/`errored`/`killed`/`presumed_dead` · blue `completed`. `conflicted` → yellow (unused today).
@@ -152,16 +153,17 @@ def status_color(status: Status) -> str:
 
 - [ ] **Step 2: Write the failing test.** Create `tests/test_showcase.py`:
 ```python
+import asyncio
+import importlib.util
+
 import pytest
 
 
-@pytest.mark.asyncio
-async def test_showcase_writes_the_hero_png(tmp_path):
-    import importlib.util
+def test_showcase_writes_the_hero_png(tmp_path):   # sync wrapper — NO @pytest.mark.asyncio
     if importlib.util.find_spec("cairosvg") is None:
         pytest.skip("cairosvg not installed")
     from scripts.showcase import scene_table   # scripts importable via pythonpath="."
-    out = await scene_table(tmp_path)
+    out = asyncio.run(scene_table(tmp_path))
     assert out.exists() and out.stat().st_size > 0
     assert out.with_suffix(".svg").exists()
 ```
@@ -297,13 +299,13 @@ Add four scene functions and register them in `SCENES`. Each reuses `capture` + 
 - [ ] **Step 1: Extend the test** to assert all five PNGs render (parametrize over `SCENES`):
 ```python
 @pytest.mark.parametrize("name", ["table", "single", "integrity", "drilldown", "stop"])
-@pytest.mark.asyncio
-async def test_every_scene_renders(name, tmp_path):
+def test_every_scene_renders(name, tmp_path):   # sync wrapper — NO @pytest.mark.asyncio
     import importlib.util
     if importlib.util.find_spec("cairosvg") is None:
         pytest.skip("cairosvg not installed")
+    import asyncio
     from scripts.showcase import SCENES
-    out = await SCENES[name](tmp_path)
+    out = asyncio.run(SCENES[name](tmp_path))
     assert out.exists() and out.stat().st_size > 0
 ```
 
