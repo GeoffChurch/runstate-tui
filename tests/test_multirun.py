@@ -296,6 +296,55 @@ async def _watchdog_banner_shows_and_hides(tmp_path):
         assert not banner.display  # banner hidden again
 
 
+def test_watchdog_banner_shows_on_a_first_frame_wedge(tmp_path, monkeypatch):
+    # Fix (final review): if the owner thread wedges on its VERY FIRST fold (e.g. every
+    # run sits on a hung mount at launch), TableReady never fires -- _last_ready must be
+    # baselined at on_mount, or _is_stalled() (which treats None as "not stalled") would
+    # never trip and the banner would stay silent forever over a permanently blank table
+    # -- the exact §10 failure the watchdog exists to prevent, just at t=0 instead of
+    # mid-session. Unlike test_watchdog_banner_shows_and_hides_the_stall, this drives the
+    # FIRST-frame case: no successful TableReady has EVER landed before the stall check.
+    # _DRAIN_TIMEOUT is shrunk so on_unmount's drain gives up and leaks promptly instead
+    # of blocking the full default 5s against a fold that stays wedged through teardown.
+    gate = threading.Event()
+
+    def wedged_fold(pool, refs, env, now):
+        gate.wait(5.0)  # bounded so a failed test can't hang forever
+        return ()
+
+    monkeypatch.setattr(multirun_mod, "fold_frame", wedged_fold)
+    monkeypatch.setattr(multirun_mod, "_DRAIN_TIMEOUT", 0.2)
+    try:
+        asyncio.run(_watchdog_banner_shows_on_a_first_frame_wedge(gate))
+    finally:
+        gate.set()  # belt-and-braces: release it if the body raised before its own gate.set()
+
+
+async def _watchdog_banner_shows_on_a_first_frame_wedge(gate):
+    clock = {"t": 100_000.0}
+    app = MultiRunApp(
+        explicit_resolver([]), Env(clock=lambda: clock["t"]), tick_interval=999, stall_ticks=3
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._last_ready is not None  # baselined at mount, not left None forever
+        banner = app.query_one("#stall", Static)
+        assert not banner.display  # no time has passed yet
+        clock["t"] += 3000.0  # > 3 * 999 stall window; fold is STILL wedged, never posted
+        app._on_watchdog()
+        assert banner.display  # trips even though no fold has EVER completed
+        assert "I/O stalled" in str(banner.content)
+        # leaving this block triggers unmount; the shrunk _DRAIN_TIMEOUT above makes the
+        # drain give up and leak promptly rather than block on the still-wedged fold.
+    # Release the wedged worker only AFTER the screen has fully torn down (past this
+    # point, not before): releasing it while the app is still mounted would let the
+    # freed worker thread post a real TableReady that races the teardown's unmounting
+    # -- an intermittent NoMatches on '#runs' (observed empirically). Releasing it here
+    # also lets asyncio.run()'s own executor-shutdown return promptly instead of
+    # blocking on the still-running thread for its full internal bound.
+    gate.set()
+
+
 def test_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
     asyncio.run(_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path))
 

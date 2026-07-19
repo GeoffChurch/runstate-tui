@@ -102,6 +102,15 @@ class MultiRunApp(App[None]):
         # MAIN-thread, independent of the owner thread — a wedged owner thread
         # can't also freeze the watchdog.
         self.set_interval(self._tick_interval, self._on_watchdog)
+        # Baseline BEFORE the first tick: if the owner thread wedges on its very FIRST
+        # fold (e.g. all runs on a hung mount at launch), TableReady never fires and
+        # _last_ready would otherwise stay None forever -- _is_stalled() treats None as
+        # "not stalled" (see below), so the banner would never trip and a permanently
+        # blank table would give no signal at all (the exact §10 failure the watchdog
+        # exists to prevent, just at t=0 instead of mid-session). Seeding it here makes
+        # _is_stalled() measure from mount time; a healthy fast first frame overwrites it
+        # in on_table_ready before the stall window elapses, so this never fires falsely.
+        self._last_ready = self._env.clock()
         self._tick()
 
     def _tick(self) -> None:

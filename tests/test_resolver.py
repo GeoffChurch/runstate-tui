@@ -26,6 +26,10 @@ def test_explicit_resolver_dedupes_exact_duplicates_preserving_order():
 
     refs = [("a", "/root", "sqlite"), ("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
     assert explicit_resolver(refs)(0.0) == [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
+    # Order-discriminating case: the dedup'd order does NOT coincide with alphabetical, so
+    # a sorted(set(...)) mis-implementation (which would yield a before b) fails here.
+    reordered = [("b", "/r", "sqlite"), ("b", "/r", "sqlite"), ("a", "/r", "sqlite")]
+    assert explicit_resolver(reordered)(0.0) == [("b", "/r", "sqlite"), ("a", "/r", "sqlite")]
 
 
 def test_ref_key_distinguishes_same_basename_across_roots():

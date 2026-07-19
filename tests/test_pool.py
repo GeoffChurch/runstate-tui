@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 from runstate import open_channel
@@ -91,6 +92,25 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
     assert len(pool) <= 2  # LRU kept the pool bounded
     with pytest.raises(sqlite3.ProgrammingError):
         ch0.read(after=0)  # evicted handle was actually closed
+    pool.close_all()
+
+
+def test_row_for_evicts_a_pooled_run_whose_db_file_vanishes(tmp_path):
+    # Coverage gap (final review): the pool's OWN missing/unreadable self-heal path
+    # (row_for's stat-before-open, run every tick, evict-on-FileNotFoundError) was never
+    # exercised once a channel was already pooled. A run's .db can vanish mid-session
+    # (deleted out from under a live cockpit) after the pool cached its channel; the NEXT
+    # fold's stat must catch this, evict the now-dangling handle, and render a loud
+    # `missing` row -- not serve a phantom read off a channel whose backing file is gone.
+    ref = _seed(tmp_path, "a")
+    env = Env(clock=lambda: 150.0)
+    pool = ChannelPool(cap=8)
+    fold_frame(pool, [ref], env, 150.0)  # first fold: opens + pools the channel
+    assert ref in pool._open
+    (Path(tmp_path) / "a.db").unlink()
+    table = dict(fold_frame(pool, [ref], env, 151.0))  # second fold: stat finds it gone
+    assert table[ref].status.kind is StatusKind.MISSING
+    assert ref not in pool._open  # evicted, not left dangling in the pool
     pool.close_all()
 
 
