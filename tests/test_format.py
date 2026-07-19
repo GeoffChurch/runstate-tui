@@ -162,3 +162,17 @@ def test_format_detail_shows_terminal_error_diagnostic():
     row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
     text = format_detail(row)
     assert "errored: OOM killed" in text
+
+
+def test_status_color_maps_kinds_and_outcomes():
+    from runstate_tui.format import status_color
+
+    assert status_color(Status.live()) == "green"
+    assert status_color(Status.stale()) == "yellow"
+    assert status_color(Status.pending()) == "grey58"
+    assert status_color(Status.missing()) == "grey58"
+    assert status_color(Status.corrupt()) == "red"
+    assert status_color(Status.unreadable()) == "red"
+    assert status_color(Status.error()) == "red"
+    assert status_color(Status.terminal(Outcome.COMPLETED)) == "blue"
+    assert status_color(Status.terminal(Outcome.ERRORED)) == "red"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.message import Message
@@ -10,11 +11,12 @@ from textual.widgets import DataTable, Static
 
 from .detail import _TEARDOWN_ERRORS, DrillDownScreen
 from .env import Env
+from .format import status_color
 from .pool import ChannelPool, Table, fold_frame
 from .resolver import Resolver, RunRef, ref_key
 from .types import Row, Severity
 
-_COLUMNS = ("run", "status", "step", "age", "value", "elapsed", "!")
+_COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
 
 # How long on_unmount waits for the owner thread to finish its in-flight fold before
 # giving up and LEAKING the pool (see on_unmount) rather than hanging quit forever on a
@@ -33,8 +35,11 @@ def _marker(row: Row) -> str:
     return stops
 
 
-def _cells(ref: RunRef, row: Row) -> tuple[str, str, str, str, str, str, str]:
-    """The 7 column cells — same field semantics as format_row, one field per column."""
+def _cells(ref: RunRef, row: Row) -> tuple[Text, str, str, str, str, str, str, str]:
+    """The 8 column cells — same field semantics as format_row, one field per column.
+    The leading `dot` cell is a traffic-light ● redundant with the `status` text cell
+    (never the sole signal)."""
+    dot = Text("●", style=status_color(row.status))
     run_id = ref[0]
     status = row.status.label + (f": {row.status.detail}" if row.status.detail else "")
     step = "" if row.frontier is None else str(row.frontier)
@@ -45,7 +50,7 @@ def _cells(ref: RunRef, row: Row) -> tuple[str, str, str, str, str, str, str]:
         name, val, vstep = row.value
         value = f"{name}={val}" + (f"@{vstep}" if vstep is not None else "")
     elapsed = "" if row.elapsed is None else f"{row.elapsed:.0f}s"
-    return (run_id, status, step, age, value, elapsed, _marker(row))
+    return (dot, run_id, status, step, age, value, elapsed, _marker(row))
 
 
 class TableReady(Message):
@@ -93,7 +98,10 @@ class MultiRunApp(App[None]):
         t = self.query_one("#runs", DataTable)
         # explicit (label, key) tuples; an unkeyed add_columns yields anonymous
         # ColumnKey(None) and every later update_cell/sort fails deterministically.
-        t.add_columns(*[(c, c) for c in _COLUMNS])
+        # The dot column gets a BLANK header (it's a redundant traffic-light glyph,
+        # not a labeled field) but a real "dot" key so the reconcile loop below can
+        # address it like every other column.
+        t.add_columns(("", "dot"), *[(c, c) for c in _COLUMNS[1:]])
         t.cursor_type = "row"
         # Static("").update("") still reserves a 1-line height in Textual 8.2.8 (verified
         # empirically) -- an empty renderable is NOT the same as no line, so the banner

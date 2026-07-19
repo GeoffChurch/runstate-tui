@@ -1,8 +1,36 @@
 from __future__ import annotations
 
 from runstate.channel import Envelope
+from runstate.observables import Outcome
 
-from .types import Row
+from .types import Row, Status, StatusKind
+
+_STATUS_COLORS = {
+    StatusKind.LIVE: "green",
+    StatusKind.STALE: "yellow",
+    StatusKind.PENDING: "grey58",
+    StatusKind.MISSING: "grey58",
+    StatusKind.CORRUPT: "red",
+    StatusKind.UNREADABLE: "red",
+    StatusKind.ERROR: "red",
+    StatusKind.CONFLICTED: "yellow",
+}
+_OUTCOME_COLORS = {
+    Outcome.COMPLETED: "blue",
+    Outcome.PREEMPTED: "yellow",
+    Outcome.ERRORED: "red",
+    Outcome.KILLED: "red",
+    Outcome.PRESUMED_DEAD: "red",
+}
+
+
+def status_color(status: Status) -> str:
+    """A Rich color name for a status — the traffic-light dot. Redundant with the
+    text label (never the sole signal). Keyed on StatusKind, refined by terminal
+    Outcome."""
+    if status.kind is StatusKind.TERMINAL and status.outcome is not None:
+        return _OUTCOME_COLORS.get(status.outcome, "blue")
+    return _STATUS_COLORS.get(status.kind, "grey58")
 
 
 def format_row(row: Row) -> str:

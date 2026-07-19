@@ -345,6 +345,24 @@ async def _watchdog_banner_shows_on_a_first_frame_wedge(gate):
     gate.set()
 
 
+def test_table_has_a_colored_status_dot(tmp_path):
+    asyncio.run(_table_has_a_colored_status_dot(tmp_path))
+
+
+async def _table_has_a_colored_status_dot(tmp_path):
+    # The leading `dot` column is a redundant traffic-light: a Rich Text "●" styled
+    # via status_color(row.status) -- never the sole signal (the text status column
+    # still carries the label). A live run's dot must be green.
+    ref = _seed(tmp_path, "a")  # a live run under the fixed clock
+    app = MultiRunApp(explicit_resolver([ref]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        cell = t.get_cell(ref_key(ref), "dot")  # the stored Rich Text, unconverted
+        assert "●" in cell.plain and cell.style == "green"
+
+
 def test_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
     asyncio.run(_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path))
 
