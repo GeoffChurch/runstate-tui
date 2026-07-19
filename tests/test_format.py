@@ -145,6 +145,38 @@ def test_topic_color_by_family():
     assert topic_color("something.else") == "#8b949e"
 
 
+def test_summary_card_colors_only_the_dot_not_the_whole_line():
+    # `Text("● ", style=X)` sets the Text's BASE style, which every subsequently
+    # appended plain-string segment inherits at render time (the Rich base-style-
+    # inheritance footgun -- the same class the multirun `_marker` chip guards
+    # against, see test_marker_undischarged_stop_alone_renders_neutral). That would
+    # paint the WHOLE first line (dot + status/step/loss summary) in the status
+    # color instead of just the dot, contradicting the design: the dot carries the
+    # color, the text stays uncolored (redundant signal, not a christmas tree).
+    # `Text.join` folds each joined Text's base style into an explicit Span over
+    # that Text's exact character range in the result, so this is checkable
+    # directly on `format_summary_card`'s returned Text without rendering to
+    # segments: a correctly-scoped fix produces exactly one Span, 2 characters
+    # wide ("● "), carrying the status color; a base-style leak instead produces
+    # one Span spanning the whole first line.
+    from rich.text import Span
+
+    from runstate_tui.format import format_summary_card, status_color
+
+    row = _row(
+        status=Status.live(),
+        frontier=7,
+        freshness=10.0,
+        value=("loss", 0.03, 7),
+        elapsed=50.0,
+    )
+    card = format_summary_card(row)
+    color = status_color(row.status)
+    assert color == "#3fb950"  # live -- pins the discriminating color from the bug report
+
+    assert card.spans == [Span(0, len("● "), color)]
+
+
 def test_summary_card_is_two_compact_lines_with_counts():
     from rich.text import Text
 

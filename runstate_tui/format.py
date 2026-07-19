@@ -69,7 +69,11 @@ def format_summary_card(row: Row) -> Text:
     """The drill-down's compact 2-line header card: the one-line summary (with the
     status dot) + episode and COUNTS. The full stop/demand/issue lists live in the
     enter-expand, not here."""
-    line1 = Text("● ", style=status_color(row.status))
+    line1 = Text()
+    line1.append("● ", style=status_color(row.status))  # a Span on an unstyled base, so the
+    # summary appended next does NOT inherit the color (Text(text, style=X) sets the base
+    # style, which every subsequently-appended plain segment inherits at render time --
+    # see test_summary_card_colors_only_the_dot_not_the_whole_line).
     line1.append(format_row(row))  # the existing one-line summary
     parts = [f"episode {row.episode}" if row.episode else "episode —"]
     if row.undischarged_stops:
