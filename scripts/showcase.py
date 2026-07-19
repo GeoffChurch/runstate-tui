@@ -135,11 +135,14 @@ async def scene_single(out_dir: Path) -> Path:
 async def scene_integrity(out_dir: Path) -> Path:
     root = Path(tempfile.mkdtemp())
 
-    c = _ch(root, "corrupt")  # started + hb, then the hb record byte-torn -> ⚠⚠ + red dot
+    # Realistic run names — the STATUS column + the colored dot carry the integrity state,
+    # NOT the run name (the `run` column is just the run_id; naming files after their state
+    # would misleadingly imply a name<->status coupling that does not exist).
+    c = _ch(root, "train-gpt2")  # byte-torn hb -> corrupt (⚠⚠ + red dot)
     c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
     c.send({"step": 10, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
     c.close()
-    _corrupt(root, "corrupt", 2, "{not json")
+    _corrupt(root, "train-gpt2", 2, "{not json")
 
     # not a sqlite database at all -- open_channel raises sqlite3.DatabaseError, caught
     # by open_and_fold's _OPEN_ERRORS -> unreadable (red dot, no marker). NOT a foreign
@@ -147,19 +150,21 @@ async def scene_integrity(out_dir: Path) -> Path:
     # tests/scenarios/test_fold_plane.py::test_foreign_valid_db_reads_pending) where
     # open_channel's `CREATE TABLE IF NOT EXISTS log` silently adopts the file and it
     # reads back as an ordinary empty `pending` run instead.
-    (root / "unreadable.db").write_bytes(b"this is not a sqlite database")
+    (root / "eval-glue.db").write_bytes(b"this is not a sqlite database")  # -> unreadable (red dot)
 
-    # "missing": its .db is never created -- grey dot, no marker.
+    # "finetune-t5": its .db is never created -> missing: grey dot, no marker.
 
-    c = _ch(root, "malformed")  # started + hb + value, then the value body -> alien int -> ⚠
+    c = _ch(
+        root, "sweep-lr9"
+    )  # started + hb + value, then the value body -> alien int -> live + malformed ⚠
     c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
     c.send({"step": 10, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
     c.send({"value": 0.5, "step": 10, "t": 292.0}, topic="value", name="loss")
     c.close()
-    _corrupt(root, "malformed", 3, "42")
+    _corrupt(root, "sweep-lr9", 3, "42")
 
     refs: list[RunRef] = [
-        (r, str(root), "sqlite") for r in ("corrupt", "unreadable", "missing", "malformed")
+        (r, str(root), "sqlite") for r in ("train-gpt2", "eval-glue", "finetune-t5", "sweep-lr9")
     ]
     app = MultiRunApp(
         explicit_resolver(refs), Env(clock=lambda: NOW, objective="loss"), tick_interval=999
