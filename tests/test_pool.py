@@ -6,7 +6,7 @@ from runstate import open_channel
 from runstate_tui.env import Env
 from runstate_tui.pool import ChannelPool, fold_frame
 from runstate_tui.table import render_single
-from runstate_tui.types import StatusKind
+from runstate_tui.types import Severity, StatusKind
 from tests.helpers import corrupt_seq
 
 
@@ -52,6 +52,32 @@ def test_fold_frame_one_corrupt_run_does_not_sink_the_others(tmp_path):
     assert table[good].status.kind is not StatusKind.CORRUPT
     assert table[bad].status.kind is StatusKind.CORRUPT  # contained
     assert bad not in [r for r in pool._open]  # bad handle evicted; re-detected next tick
+    pool.close_all()
+
+
+def test_fold_frame_contains_one_runs_unexpected_fold_error(tmp_path, monkeypatch):
+    # An UNEXPECTED exception escaping one run's fold (a genuine internal bug — distinct
+    # from the EXPECTED missing/unreadable/corrupt/malformed rows) must be contained to a
+    # loud per-run `error` row: fold_frame stays TOTAL (does NOT raise) and the OTHER runs
+    # still render normally. This is the per-run analogue of the corrupt-containment test.
+    good = _seed(tmp_path, "good")
+    bad = _seed(tmp_path, "bad")
+    env = Env(clock=lambda: 150.0)
+    pool = ChannelPool(cap=8)
+    real_row_for = ChannelPool.row_for
+
+    def flaky_row_for(self, ref, frame_env):
+        if ref[0] == "bad":
+            raise RuntimeError("boom: internal fold bug on run bad")
+        return real_row_for(self, ref, frame_env)
+
+    monkeypatch.setattr(ChannelPool, "row_for", flaky_row_for)
+    table = dict(fold_frame(pool, [good, bad], env, 150.0))  # must NOT raise -- fold_frame is total
+    assert table[bad].status.kind is StatusKind.ERROR  # a distinct, loud fold-error row
+    assert table[bad].severity is Severity.HIGH
+    assert "RuntimeError" in (table[bad].status.detail or "")  # the exception rides the detail
+    assert table[good].status.kind is not StatusKind.ERROR  # the other run rendered normally...
+    assert table[good].elapsed == 50.0  # ...as a real fold (started t=100, now=150)
     pool.close_all()
 
 

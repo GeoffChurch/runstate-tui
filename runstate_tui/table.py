@@ -48,6 +48,37 @@ def _corrupt(seq: int | None) -> Row:
     )
 
 
+def _fold_error(exc: Exception) -> Row:
+    """A row for an UNEXPECTED exception escaping the fold — i.e. a genuine internal bug on
+    ONE run. Every EXPECTED fold failure is already its own loud row: missing/unreadable
+    (`_bare`), byte-torn (`_corrupt`), malformed record (a per-factor Issue). Containing the
+    escaped exception to a distinct HIGH `error` row (NOT reused `unreadable`/`corrupt`,
+    which would be lossy) keeps the table alive while the worker stays fail-fast for
+    catastrophic non-fold bugs. The exception rides both the status detail and the Issue
+    message so it surfaces in the table's status column AND the drill-down's issue list."""
+    detail = f"{type(exc).__name__}: {exc}"
+    # IssueKind.MALFORMED is the closest existing kind ("the fold could not produce a valid
+    # interpretation of this run"); CORRUPT is reserved for a byte-torn log at a known seq.
+    # The kind is an internal tag (never displayed — only `message` renders), so the loud,
+    # faithful signal is StatusKind.ERROR at the status level.
+    issue = Issue(
+        kind=IssueKind.MALFORMED,
+        severity=Severity.HIGH,
+        message=f"unexpected fold error: {detail}",
+    )
+    return Row(
+        status=Status.error(detail=detail),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(),
+        live_demand=(),
+        issues=(issue,),
+    )
+
+
 def fold_open_channel(channel: Channel, env: Env) -> Row:
     """Fold an ALREADY-OPEN channel with the integrity guards, WITHOUT closing it.
     A byte-torn (json.JSONDecodeError) -> loud `corrupt` carrying the located seq; a

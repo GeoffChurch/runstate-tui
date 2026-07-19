@@ -111,7 +111,7 @@ class MultiRunApp(App[None]):
         if not self._closing:
             self._fold_frame()
 
-    @work(thread=True, exclusive=True, exit_on_error=False)
+    @work(thread=True, exclusive=True)
     def _fold_frame(self) -> None:  # the single owner thread — owns the whole pool
         # clear _idle as the FIRST statement -- before even the _closing check -- so
         # on_unmount's drain can never observe "idle" while this invocation still might
@@ -126,21 +126,20 @@ class MultiRunApp(App[None]):
                 self.post_message(TableReady(table))  # post_message is thread-safe on its own
             except _TEARDOWN_ERRORS:
                 pass  # a quit landed mid-frame; drop the marshal
-        finally:
-            # Reschedule in the FINALLY so an unexpected raise from fold_frame above still
-            # self-heals the tick chain instead of silently killing it. Paired with
-            # exit_on_error=False (a bug in one frame must not crash the whole cockpit), a
-            # transient fold raise recovers on the next tick and a *persistent* one degrades
-            # into a retry loop the watchdog surfaces as ⚠ I/O stalled -- loud, not a silent
-            # freeze (§10 satisfied via the watchdog, the multi-run analogue of app.py's
-            # fail-fast crash). Guarded on _closing so teardown never re-arms the loop, and
+            # Reschedule on the SUCCESS path (after post_message), NOT the finally. fold_frame
+            # is total -- a per-run fold bug is contained to a loud fold-error row -- so the
+            # only way to skip this reschedule is a CATASTROPHIC non-fold bug (e.g. a broken
+            # resolver): that exception propagates, the loop stops, and exit_on_error (default
+            # True, matching SingleRunApp) crashes the cockpit loudly -- fail-fast, §10 "a
+            # crash is not a freeze". Guarded on _closing so teardown never re-arms the loop;
             # wrapped in _TEARDOWN_ERRORS so a quit landing mid-marshal is dropped, not raised.
             if not self._closing:
                 try:
                     self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
                 except _TEARDOWN_ERRORS:
                     pass
-            self._idle.set()  # always -- even on an early return or an unexpected raise
+        finally:
+            self._idle.set()  # always -- even on an early return or an uncaught raise
 
     def on_table_ready(self, msg: TableReady) -> None:  # MAIN thread: keyed reconcile
         self._last_ready = self._env.clock()

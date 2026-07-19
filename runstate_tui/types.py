@@ -52,14 +52,23 @@ class StatusKind(Enum):
     UNREADABLE = "unreadable"
     CONFLICTED = "conflicted"
     CORRUPT = "corrupt"
+    ERROR = "error"  # an UNEXPECTED exception escaped the fold — a genuine internal bug on one run
 
 
 _STATUS_SEVERITY = {
     StatusKind.UNREADABLE: Severity.HIGH,
     StatusKind.CORRUPT: Severity.HIGH,
+    StatusKind.ERROR: Severity.HIGH,
     StatusKind.CONFLICTED: Severity.MEDIUM,
     StatusKind.PENDING: Severity.INFO,
     StatusKind.MISSING: Severity.INFO,
+}
+
+# non-terminal kinds whose displayed label differs from the raw kind value. Mirrors
+# _TERMINAL_LABELS: ERROR renders "fold-error" so an internal fold bug is never confused
+# with a run's terminal `errored` outcome (which labels "errored" via _TERMINAL_LABELS).
+_KIND_LABELS = {
+    StatusKind.ERROR: "fold-error",
 }
 
 
@@ -98,6 +107,12 @@ class Status:
         return cls(StatusKind.CORRUPT)
 
     @classmethod
+    def error(cls, detail: str | None = None) -> Status:
+        # an unexpected fold exception, contained to a loud per-run row (fold_frame stays
+        # total); `detail` carries the exception text. Distinct from a terminal `errored`.
+        return cls(StatusKind.ERROR, detail=detail)
+
+    @classmethod
     def terminal(cls, outcome: Outcome, detail: str | None = None) -> Status:
         return cls(StatusKind.TERMINAL, outcome, detail=detail)
 
@@ -107,7 +122,7 @@ class Status:
             assert self.outcome is not None  # invariant: set iff kind is TERMINAL
             # render honestly: an unrecognized outcome falls back to its own wire string
             return _TERMINAL_LABELS.get(str(self.outcome.value), str(self.outcome.value))
-        return str(self.kind.value)
+        return _KIND_LABELS.get(self.kind, str(self.kind.value))
 
     @property
     def severity(self) -> Severity:

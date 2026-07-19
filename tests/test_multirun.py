@@ -132,39 +132,37 @@ async def _duplicate_ref_yields_one_row(tmp_path):
         assert {k.value for k in t.rows.keys()} == {ref_key(a)}
 
 
-def test_fold_raise_self_heals_the_tick_chain(tmp_path, monkeypatch):
-    # Finding 4: an unexpected raise from a fold must NOT permanently kill the tick chain.
-    # With the reschedule in the finally (+ exit_on_error=False) the loop self-heals: the
-    # first fold raises, a later fold succeeds and populates the row. If the reschedule sat
-    # in the try (skipped by the raise), row_count would stay 0 forever.
-    real_fold = multirun_mod.fold_frame
-    calls = {"n": 0}
-    lock = threading.Lock()
+def test_app_survives_a_contained_fold_error(tmp_path, monkeypatch):
+    # Owner policy (faithful containment): a per-run fold bug is contained to a loud
+    # fold-error row (fold_frame is total), so the whole cockpit does NOT crash -- the table
+    # still updates (a TableReady still fires) and the errored run coexists with healthy ones.
+    # Distinct from the reverted self-heal-retry: here the worker stays fail-fast, the error
+    # is surfaced per-run, not masked as ⚠ I/O stalled.
+    real_row_for = ChannelPool.row_for
 
-    def flaky_fold(pool, refs, env, now):
-        with lock:
-            calls["n"] += 1
-            first = calls["n"] == 1
-        if first:
-            raise RuntimeError("boom: unexpected fold raise on the first frame")
-        return real_fold(pool, refs, env, now)
+    def flaky_row_for(self, ref, frame_env):
+        if ref[0] == "a":
+            raise RuntimeError("boom: internal fold bug on run a")
+        return real_row_for(self, ref, frame_env)
 
-    monkeypatch.setattr(multirun_mod, "fold_frame", flaky_fold)
-    asyncio.run(_fold_raise_self_heals(tmp_path))
+    monkeypatch.setattr(ChannelPool, "row_for", flaky_row_for)
+    asyncio.run(_app_survives_a_contained_fold_error(tmp_path))
 
 
-async def _fold_raise_self_heals(tmp_path):
-    ref = _seed(tmp_path, "a")
-    app = MultiRunApp(explicit_resolver([ref]), Env(clock=lambda: 150.0), tick_interval=0.05)
+async def _app_survives_a_contained_fold_error(tmp_path):
+    a = _seed(tmp_path, "a")
+    b = _seed(tmp_path, "b")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
     async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
         t = app.query_one("#runs", DataTable)
-        healed = False
-        for _ in range(100):
-            await pilot.pause(0.02)
-            if t.row_count == 1:
-                healed = True
-                break
-        assert healed  # tick chain survived the unexpected fold raise and re-populated
+        assert app._last_ready is not None  # a TableReady fired -> the cockpit did NOT crash
+        assert t.row_count == 2  # the errored run did not sink the frame; both runs present
+        # a's status cell is the loud fold-error verdict (label + the exception detail)...
+        assert t.get_cell(ref_key(a), "status").startswith("fold-error")
+        assert "RuntimeError" in t.get_cell(ref_key(a), "status")
+        assert not t.get_cell(ref_key(b), "status").startswith("fold-error")  # ...b is normal
 
 
 def test_teardown_drain_blocks_until_fold_finishes(tmp_path, monkeypatch):

@@ -9,7 +9,7 @@ from runstate.channel import Channel
 
 from .env import Env
 from .resolver import RunRef
-from .table import _OPEN_ERRORS, _bare, fold_open_channel
+from .table import _OPEN_ERRORS, _bare, _fold_error, fold_open_channel
 from .types import Row, Status, StatusKind
 
 Table = tuple[tuple[RunRef, Row], ...]
@@ -85,4 +85,16 @@ def fold_frame(pool: ChannelPool, refs: list[RunRef], env: Env, now: float) -> T
     liveness carry through). The row for `r` == render_single(r) at this `now`."""
     frame_env = replace(env, clock=lambda: now)
     pool.reconcile(set(refs))
-    return tuple((ref, pool.row_for(ref, frame_env)) for ref in refs)
+    # fold_frame is TOTAL: an EXPECTED fold failure is already a loud row (missing/
+    # unreadable/corrupt/malformed), so any exception escaping row_for is a genuine
+    # internal bug on ONE run. Contain it to a loud per-run `error` row rather than let
+    # it sink the whole frame — the table survives; the worker stays fail-fast for
+    # catastrophic non-fold bugs (a broken resolver/reconcile, which are outside this loop).
+    rows: list[tuple[RunRef, Row]] = []
+    for ref in refs:
+        try:
+            row = pool.row_for(ref, frame_env)
+        except Exception as exc:  # noqa: BLE001 — internal fold bug -> loud per-run row, table survives
+            row = _fold_error(exc)
+        rows.append((ref, row))
+    return tuple(rows)
