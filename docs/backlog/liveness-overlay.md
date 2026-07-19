@@ -83,3 +83,52 @@ SLURM/k8s deployments, where `os.kill` from the cockpit host means nothing.
   tick** and index the result by job id.
 - Fits §8 "stays in the cockpit" (deployment policy) and runstate's bring-your-own-launcher
   stance (a SLURM launcher example already ships in runstate `examples/submitit/`).
+
+## Representation, severity & residual decisions (settled 2026-07-19)
+
+The 2026-07-18 verdict above left `conflicted`'s *shape* open. Settled now:
+
+- **Don't collapse — render the disagreement, don't fold it into a verdict.** Keep the log-fold
+  verdict (the existing `status`) and the probe verdict as two *separate* factors on the `Row`;
+  `conflicted` is the derived observation `log_verdict ≠ probe_verdict`, computed at render, never
+  a stored third status. This is the R2 fold-vs-query split applied literally (log-fold =
+  aggregation, probe = query/overlay), and it is the **least invasive** option: `status`/
+  `status_fold` is untouched, no new dominating `StatusKind`, purely additive (one probe-verdict
+  field on `Row`).
+  - **This dissolves the hard half of the row-3-vs-row-4 call** — there is no "which verdict wins
+    the row" to adjudicate; you show both. For a *probed* run the probe is ground truth, so the old
+    pure-log "activity-after-terminal: override or benign-straggler (a `stuck_threshold`-flavored
+    policy)" heuristic is *superseded*, not needed. The threshold question survives only for
+    *un-probed* runs, and that folds into the cadence/scope decision below.
+- **Severity = MEDIUM (derived, not chosen).** HIGH = "can't read/trust the substrate at all"
+  (unreadable/corrupt/internal-error); MEDIUM = "verdict stands, a signal is flagged" (malformed,
+  skew). Conflict is *two valid readings in tension* — nothing failed to read — so it is the
+  structural twin of `SKEW_SUSPECTED` (also two valid signals disagreeing), which is MEDIUM.
+  Clincher: severity drives `row.severity = max(...)` → the marker glyph, so HIGH would render
+  conflict *identically* (`⚠⚠`) to "I literally cannot read this run," conflating a recoverable,
+  fully-visible tension with an opaque failure. MEDIUM keeps them honestly distinct (`⚠` vs `⚠⚠`),
+  and matches the existing `_STATUS_SEVERITY[CONFLICTED] = MEDIUM`.
+- **Direction (zombie vs ghost) rides the badge message, never the severity.** Uniform MEDIUM for
+  both; the `Issue.message`/`detail` names which way the contradiction runs — "log terminal, worker
+  alive" (zombie) vs "log active, worker gone" (ghost → `presumed_dead`). Severity is the tier; the
+  message is the cause (faithful-representation: don't smuggle the direction into the severity
+  channel).
+- **Structural gotcha — the probe must stay OUT of the status fold.** The probe is a
+  channel-reading `LivenessSignal` and slots into the existing `env.liveness` seam — BUT it must
+  **not** flow through `resolve_liveness → status` the way `FreshnessSignal` does, or it is folded
+  back into the single verdict and "don't collapse" is silently undone. The probe is a separate
+  factor *compared against* the status, not another vote *inside* it. (Freshness is a log-clock
+  inference → correctly inside status; the probe is an external check → a distinct factor; opposite
+  sides of the fold-vs-query line.)
+
+**Deferred to build-time (cost-driven — decide against measurements, not now):**
+
+1. **Probe cadence/scope within §10** — the crux. A live `resolve(handle)` per run per tick is I/O;
+   N of them can blow the frame budget or wedge (D-state, like a wedged open). Likely cheapest first
+   cut: **drill-down-only** (probe the one selected run, on demand) — sidesteps N-per-tick entirely.
+   Alternatives: throttle, or probe only *contradictable* runs (live/stale, or freshly-terminal).
+   Cross-host probes still follow the "one scheduler query per group per tick" batching rule above.
+2. **Three-valued probe** — when the probe can't decide (measurement ambiguity), read it as "no
+   disagreement (trust the log)" or as a distinct "unverified" marker?
+3. **Cosmetic** — surface the world-verdict as a standing column always, or only as a badge when it
+   disagrees?
