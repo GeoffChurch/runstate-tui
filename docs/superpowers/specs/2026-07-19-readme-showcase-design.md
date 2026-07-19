@@ -19,6 +19,27 @@ and emits static PNGs, embedded in the README under a "Screens" section. Regener
 - **No pixel-diff CI gate.** `pytest-textual-snapshot` already guards layout; the generator running
   green in CI (every screen renders without error) is the smoke-test value, not image equality.
 
+## Product polish (folded in — improves the real cockpit, not just the shots)
+
+Two small rendering tweaks land first, both **spike-verified through cairosvg** (2026-07-19):
+
+- **`⏹` → `■` (U+25A0) for the stop badge**, in `_marker` (`multirun.py`) and `format_row`'s stop
+  marker (`format.py`). `⏹` (U+23F9) tofus in cairosvg *and* is a fragile code point for real
+  terminals; `■` (Geometric Shapes) is near-universal. Mechanical swap; the marker tests re-point to
+  `■`.
+- **A leading `●` status-dot column in the multi-run table** — a traffic-light health LED per row,
+  **redundant with** the existing text status, never the sole signal (red/green CVD ≈ 8% of men;
+  `NO_COLOR`/piped output degrades to text). A `status_color(status) -> str` (Rich color name) keyed
+  on `StatusKind` (+ terminal `Outcome`). Verified: `●` (U+25CF) + the color as an SVG `fill` both
+  render correctly through cairosvg. Mapping:
+  - **green** `live` · **amber** `stale` · **red** `corrupt`/`unreadable`/`fold-error`/terminal
+    `errored`·`killed`·`presumed_dead` · **blue** `done` (completed) · **grey** `pending`/`missing`
+    (neutral).
+  - Scope: the **table only** (scanning N rows is where an LED earns its place); the single-run
+    view's text status is unchanged this cut. Known cosmetic: the row-cursor highlight washes the
+    *selected* dot's color — the text status carries it, and the hero shot parks the cursor on a
+    healthy row.
+
 ## The generator — `scripts/showcase.py`
 
 A `python -m` / `uv run`-invokable module. One function per scene; a `main()` runs all and writes
@@ -40,10 +61,11 @@ PNGs to `docs/img/`. Each scene:
 
 ## Scenes (led by the flagship)
 
-1. **Multi-run table** — the hero. ~5 runs spanning the taxonomy in one shot: a **live** run (recent
-   heartbeat + `loss=…` value), a **stale** run (old heartbeat), a **done** run (terminal
-   `completed`), an **errored** run (terminal with a `RunResult.error` detail), and a loud
-   **corrupt** row (`corrupt_seq`). The whole control-plane-at-a-glance.
+1. **Multi-run table** — the hero, with the leading `●` traffic-light column. ~6 runs spanning the
+   taxonomy in one shot: a **live** run (recent heartbeat + `loss=…` value), a **stale** run (old
+   heartbeat), a **done** run (terminal `completed`), an **errored** run (terminal with a
+   `RunResult.error` detail), a run with an undischarged stop (`■1`), and a loud **corrupt** row
+   (`corrupt_seq`). Cursor parked on a healthy row. The whole control-plane-at-a-glance.
 2. **Single-run view** — one healthy **live** run: `status · step · age · value · elapsed`.
 3. **Integrity taxonomy** — a 4-row table: `corrupt` / `unreadable` (`foreign_db`) / `missing`
    (resolver points at an absent file) / a `malformed`-issue row (alien body). Shows the "one bad
