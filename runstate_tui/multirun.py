@@ -56,7 +56,6 @@ class TableReady(Message):
 
 class MultiRunApp(App[None]):
     CSS = "#stall { color: $warning; height: auto; }"
-    BINDINGS = [("enter", "detail", "Detail")]
 
     def __init__(
         self,
@@ -186,6 +185,18 @@ class MultiRunApp(App[None]):
             banner.display = True
         else:
             banner.display = False
+
+    def on_data_table_row_selected(self, message: DataTable.RowSelected) -> None:
+        # `enter` opens the drill-down for the selected row -- but DataTable itself
+        # binds `enter` -> action_select_cursor (which posts this RowSelected message)
+        # when cursor_type="row", and the focused DataTable intercepts the key BEFORE
+        # it can bubble to an App-level BINDINGS entry (confirmed empirically: an
+        # App-level ("enter", "detail", ...) binding never fires while the table is
+        # focused). So drill-down hooks the table's own selection message instead of
+        # trying to rebind `enter` at the App level -- the idiomatic Textual pattern
+        # for row-cursor tables, and the SingleRunApp precedent (no DataTable there,
+        # so its App-level `enter` binding works) doesn't apply here.
+        self.action_detail()
 
     def action_detail(self) -> None:
         t = self.query_one("#runs", DataTable)

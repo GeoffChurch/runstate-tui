@@ -6,6 +6,7 @@ from runstate import open_channel
 from textual.widgets import DataTable, Static
 
 import runstate_tui.multirun as multirun_mod
+from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
 from runstate_tui.multirun import MultiRunApp
 from runstate_tui.pool import ChannelPool
@@ -293,3 +294,29 @@ async def _watchdog_banner_shows_and_hides(tmp_path):
         app._last_ready = clock["t"]  # a fresh ready
         app._on_watchdog()
         assert not banner.display  # banner hidden again
+
+
+def test_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
+    asyncio.run(_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path))
+
+
+async def _enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
+    # Pins Task 3's action_detail: `enter` on the SELECTED row (not just any row) opens
+    # a DrillDownScreen for that run's ref, and `escape` pops back to the table.
+    a = _seed(tmp_path, "a")
+    b = _seed(tmp_path, "b")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        # explicitly select b -- a stronger check than "in (a, b)": proves the cursor
+        # key is mapped to the RIGHT ref, not just some ref the resolver happens to know.
+        t.move_cursor(row=t.get_row_index(ref_key(b)))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DrillDownScreen)
+        assert app.screen._ref == b
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, DrillDownScreen)
