@@ -1,88 +1,528 @@
 import asyncio
+import threading
+import time
 
+from rich.text import Text
 from runstate import open_channel
-from textual.widgets import RichLog, Static
+from textual.app import App, ComposeResult
+from textual.coordinate import Coordinate
+from textual.widgets import DataTable, Input, Static
 
+from runstate_tui import detail as detail_module
 from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
+from runstate_tui.format import topic_color
+from tests.helpers import advance_tick
 
 
-def _sqlite_rich(tmp_path):
-    ch = open_channel("r", root=tmp_path, backend="sqlite")
-    ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
-    ch.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
-    ch.send({}, topic="control.stop", request_id="webui:stop1")
-    ch.close()
-    return ("r", str(tmp_path), "sqlite")
+def _seed_rich(tmp_path):
+    """A rich run -- started(seq 1) + heartbeat(seq 2) + value(seq 3) + subscribe(seq 4)
+    + stop(seq 5) -- à la conftest.py's `rich_run` fixture / showcase.py's
+    `scene_drilldown` seed, but SQLITE-backed (not memory): DrillDownScreen and
+    read_log_delta take a RunRef and read from disk, not an already-open channel."""
+    run_id = "rich"
+    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
+    writer.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
+    writer.send({"value": 0.03, "step": 7, "t": 140.0}, topic="value", name="loss")
+    writer.send(
+        {"schedule": {}, "names": ["loss"]}, topic="control.subscribe", request_id="webui:sub1"
+    )
+    writer.send({}, topic="control.stop", request_id="webui:stop1")
+    writer.close()
+    return (run_id, str(tmp_path), "sqlite")
 
 
-def test_drilldown_renders_header_and_streams_the_log(tmp_path):
+class _HostApp(App[None]):
+    """A tiny host App that pushes DrillDownScreen on mount (the pattern every
+    DrillDownScreen test in this file reuses)."""
+
+    def __init__(self, ref, tick_interval: float = 999.0) -> None:
+        super().__init__()
+        self._ref = ref
+        self._tick_interval = tick_interval
+
+    def compose(self) -> ComposeResult:
+        yield Static("host")
+
+    def on_mount(self) -> None:
+        self.push_screen(
+            DrillDownScreen(self._ref, Env(clock=lambda: 150.0), tick_interval=self._tick_interval)
+        )
+
+
+def test_drilldown_renders_card_and_newest_first_table(tmp_path):
     asyncio.run(_renders(tmp_path))
 
 
 async def _renders(tmp_path):
-    from textual.app import App, ComposeResult
-    from textual.widgets import Static as S
-
-    ref = _sqlite_rich(tmp_path)
-
-    class Host(App[None]):
-        def compose(self) -> ComposeResult:
-            yield S("host")
-
-    app = Host()
-    async with app.run_test() as pilot:
-        screen = DrillDownScreen(ref, Env(clock=lambda: 150.0), tick_interval=0.05)
-        await app.push_screen(screen)
-        # NOTE: query via the pushed `screen`, not `app.query_one(...)` — in Textual
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        # NOTE: query via the pushed `screen`, not `app.query_one(...)` -- in Textual
         # 8.2.8, App.query_one resolves against `_compose_screen`, the screen captured
-        # at the app's *initial* compose, which is never updated by push_screen; it
-        # never sees widgets on a later-pushed screen (confirmed empirically: NoMatches
-        # 100% of the time, not a race). Screen.query_one has no such indirection.
+        # at the app's *initial* compose, which push_screen never updates; it never sees
+        # widgets on a later-pushed screen (confirmed empirically: NoMatches 100% of the
+        # time, not a race -- carried over from the pre-redesign test's NOTE).
+        # Screen.query_one has no such indirection.
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
         for _ in range(60):
             await pilot.pause(0.02)
-            head = str(screen.query_one("#detail-head", Static).content)
-            log_lines = screen.query_one("#detail-log", RichLog).lines
-            if "local://h/1" in head and len(log_lines) >= 3:
+            if t.row_count == 5:
                 break
-        head = str(screen.query_one("#detail-head", Static).content)
-        assert "local://h/1" in head  # episode in header
-        assert "webui:stop1" in head  # the stop
-        assert len(screen.query_one("#detail-log", RichLog).lines) >= 3  # log streamed
+
+        # summary card present + compact (exactly 2 lines, the design's compact card)
+        card = screen.query_one("#detail-card", Static)
+        assert isinstance(card.content, Text)  # Static.content holds the last update()'d Text
+        assert "episode" in card.content.plain
+        assert card.content.plain.count("\n") == 1
+
+        # log table newest-first (seq descending) and topic-colored
+        seqs = [t.get_cell_at(Coordinate(r, 0)) for r in range(t.row_count)]
+        assert seqs == ["5", "4", "3", "2", "1"]  # descending = newest first
+        topics = [t.get_cell_at(Coordinate(r, 1)) for r in range(t.row_count)]
+        assert [tx.plain for tx in topics] == [
+            "control.stop",
+            "control.subscribe",
+            "value",
+            "lifecycle.heartbeat",
+            "lifecycle.started",
+        ]
+        assert topics[0].style == topic_color("control.stop")
+        assert topics[2].style == topic_color("value")
+        assert topics[4].style == topic_color("lifecycle.started")
+
+
+def test_render_window_preserves_the_selected_seq_across_a_repaint(tmp_path):
+    asyncio.run(_preserves_selection(tmp_path))
+
+
+async def _preserves_selection(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+
+        # select seq 3 (topic "value", at index 2 in the newest-first [5,4,3,2,1] order)
+        t.move_cursor(row=2)
+        assert t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value == "3"
+
+        # narrow the window (drop the "control" family -> seqs 4 and 5 disappear) and
+        # repaint directly -- `_render_window` must track the SELECTED KEY (seq 3) to
+        # its NEW physical row, not leave the cursor pinned to the old row index (which
+        # is now a different envelope after the narrowing).
+        screen._enabled.discard("control")
+        screen._render_window()
+        assert t.row_count == 3
+        assert t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value == "3"
+        assert t.cursor_coordinate.row == 0  # seq 3 is now the newest surviving row
+
+
+def test_unknown_family_topics_always_shown_in_render_window(tmp_path):
+    asyncio.run(_unknown_family_always_shown(tmp_path))
+
+
+async def _unknown_family_always_shown(tmp_path):
+    # Finding #1: a topic outside the three known families (e.g. `launcher.terminated`,
+    # written onto the same run channel by runstate's Launcher) must NEVER be silently
+    # dropped, no matter which known families are toggled off -- `_predicate` hides only
+    # the toggled-off KNOWN families (`_FAMILIES - _enabled`), so an unknown family is
+    # never in that hidden set. This goes through `DrillDownScreen._render_window` (not
+    # `envelope_filter` directly) so it discriminates the restrict-to-vs-subtractive bug
+    # in `_predicate` itself.
+    from runstate.channel import Envelope
+
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+
+        launcher = Envelope(seq=6, topic="launcher.terminated", name=None, request_id=None, body={})
+        screen._window.append(launcher)
+        screen._enabled = set()  # toggle OFF every known family
+        screen._render_window()
+
+        # every known-family row is hidden; the unknown-family row is the sole survivor
+        assert t.row_count == 1
+        assert t.get_cell_at(Coordinate(0, 1)).plain == "launcher.terminated"
+
+
+def test_pop_mid_tick_does_not_crash(tmp_path, monkeypatch):
+    # Covers detail.py's teardown guard (_TEARDOWN_ERRORS / _marshal's try/except): a
+    # pop mid-tick can race _refresh's off-thread _marshal calls onto a torn-down
+    # screen. Deterministic instead of a blind sleep: render_single is patched to
+    # block on a threading.Event, so the pop is GUARANTEED to land while the tick is
+    # still mid-flight, and _marshal's call_from_thread calls are GUARANTEED to run
+    # only after the screen has been popped (confirmed empirically pre-redesign: this
+    # races self.app -- NoActiveAppError, a RuntimeError subclass already inside
+    # _TEARDOWN_ERRORS -- 100% of the time under this synchronization, not
+    # occasionally). threading.excepthook is installed OUTSIDE asyncio.run so it
+    # survives loop teardown, in case anything escapes _marshal's own guard (mirrors
+    # test_app.py's stop-teardown discipline).
+    errors: list[str] = []
+    old_hook = threading.excepthook
+    threading.excepthook = lambda a: errors.append(a.exc_type.__name__)
+    try:
+        asyncio.run(_pop_mid_tick(tmp_path, monkeypatch))
+        time.sleep(0.2)  # let any teardown exception on the tick's thread fire
+    finally:
+        threading.excepthook = old_hook
+    assert errors == [], f"tick thread raised at teardown: {errors}"
+
+
+async def _pop_mid_tick(tmp_path, monkeypatch):
+    ref = _seed_rich(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    orig_render_single = detail_module.render_single
+
+    def slow_render_single(ref, env):
+        entered.set()
+        release.wait(2.0)
+        return orig_render_single(ref, env)
+
+    monkeypatch.setattr(detail_module, "render_single", slow_render_single)
+
+    app = _HostApp(ref, tick_interval=0.02)
+    async with app.run_test() as pilot:  # on_mount fires the first (only) tick
+        for _ in range(200):
+            await pilot.pause(0.01)
+            if entered.is_set():
+                break
+        assert entered.is_set(), "the tick never entered render_single -- can't test the race"
+        await pilot.app.pop_screen()  # pop WHILE render_single is still blocked mid-tick
+        release.set()  # let the in-flight tick proceed -> its _marshal calls now race the pop
+        await pilot.pause(0.3)  # give the worker thread time to finish and marshal (or not crash)
+
+
+def test_live_tail_appends_at_top_incrementally(tmp_path):
+    # Task 4's core: the incremental delta-cursor live-tail worker (not T3's interim
+    # synchronous full-fill) -- a fresh append on a HELD writer appears at the TOP of
+    # the log table on the very next manual tick, and the table stays bounded to
+    # exactly what's been drained so far (not the whole log re-read each time).
+    asyncio.run(_live_tail(tmp_path))
+
+
+async def _live_tail(tmp_path):
+    ref = ("live", str(tmp_path), "sqlite")
+    w = open_channel("live", root=tmp_path, backend="sqlite")
+    w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    app = _HostApp(ref, tick_interval=999.0)
+    async with app.run_test(size=(90, 22)) as pilot:
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        await pilot.pause()
+        await pilot.app.workers.wait_for_complete()  # settle the automatic on_mount tick
+        t = screen.query_one("#detail-log", DataTable)
+        assert t.get_cell_at(Coordinate(0, 0)) == "1"
+        assert t.row_count == 1
+        assert screen._cursor == 1
+
+        w.send({"step": 5, "consumed_seq": 0, "t": 2.0}, topic="lifecycle.heartbeat")
+        await advance_tick(pilot, screen)
+        assert t.get_cell_at(Coordinate(0, 0)) == "2"  # newest (seq 2) now on TOP
+        assert t.row_count == 2
+        assert screen._cursor == 2
+    w.close()
+
+
+def test_yank_copies_selected_envelope(tmp_path, monkeypatch):
+    asyncio.run(_yank(tmp_path, monkeypatch))
+
+
+async def _yank(tmp_path, monkeypatch):
+    ref = _seed_rich(tmp_path)
+    copied = {}
+    app = _HostApp(ref)
+    monkeypatch.setattr(
+        type(app), "copy_to_clipboard", lambda self, text: copied.setdefault("t", text)
+    )
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("y")  # yank the selected (top = seq 5, control.stop) row
+        assert "control.stop" in copied["t"] and "5" in copied["t"]
+
+
+def test_enter_expands_then_escape_returns(tmp_path):
+    asyncio.run(_expand(tmp_path))
+
+
+async def _expand(tmp_path):
+    from runstate_tui.detail import ExpandScreen
+
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ExpandScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, ExpandScreen)
+
+
+def test_expand_screen_yank_copies_envelope(tmp_path, monkeypatch):
+    asyncio.run(_expand_yank(tmp_path, monkeypatch))
+
+
+async def _expand_yank(tmp_path, monkeypatch):
+    from runstate_tui.detail import ExpandScreen
+
+    ref = _seed_rich(tmp_path)
+    copied = {}
+    app = _HostApp(ref)
+    monkeypatch.setattr(
+        type(app), "copy_to_clipboard", lambda self, text: copied.setdefault("t", text)
+    )
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ExpandScreen)
+        await pilot.press("y")
+        assert "control.stop" in copied["t"] and "5" in copied["t"]
+
+
+def test_filter_narrows_to_matching_rows(tmp_path):
+    asyncio.run(_filter(tmp_path))
+
+
+async def _filter(tmp_path):
+    ref = _seed_rich(tmp_path)  # 5 rows incl. control.* and lifecycle.*
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        screen._filter_text = "control"
+        screen._render_window()  # simulate typed filter
+        t = screen.query_one("#detail-log", DataTable)
+        topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
+        # UPSTREAM(runstate#15): v1 filters the in-memory window; when #15 lands, this
+        # flips to assert the filter pushes into read_log_delta's read
+        assert all("control" in x for x in topics) and t.row_count >= 1
+
+
+def test_on_input_changed_narrows_via_the_real_widget(tmp_path):
+    asyncio.run(_on_input_changed(tmp_path))
+
+
+async def _on_input_changed(tmp_path):
+    # exercises on_input_changed's actual wiring (a real Input.Changed message ->
+    # self._filter_text -> _render_window), unlike test_filter_narrows_to_matching_rows
+    # above (and its UPSTREAM(runstate#15) test-lock), which sets `_filter_text`
+    # directly and calls `_render_window()` itself, bypassing the handler entirely.
+    ref = _seed_rich(tmp_path)  # 5 rows incl. control.* and lifecycle.*
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+        before = t.row_count
+
+        screen.action_filter()  # reveals + focuses the filter Input
+        await pilot.pause()
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert screen.focused is inp
+
+        await pilot.press(*"control")  # types into the real Input -> posts Input.Changed
+        await pilot.pause()
+
+        assert screen._filter_text == "control"
+        topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
+        assert topics and all("control" in x for x in topics) and t.row_count < before
+
+
+def test_toggle_hides_a_family(tmp_path):
+    asyncio.run(_toggle(tmp_path))
+
+
+async def _toggle(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        before = screen.query_one("#detail-log", DataTable).row_count
+        screen._enabled.discard("lifecycle")
+        screen._render_window()
+        after = screen.query_one("#detail-log", DataTable).row_count
+        assert after < before  # lifecycle rows hidden
+        # the remaining rows are all non-lifecycle (value/control), confirming a real
+        # subtraction rather than an accidental full clear
+        t = screen.query_one("#detail-log", DataTable)
+        topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
+        assert topics and all(not tx.startswith("lifecycle") for tx in topics)
+
+
+def test_slash_focuses_filter_input(tmp_path):
+    asyncio.run(_slash_focuses(tmp_path))
+
+
+async def _slash_focuses(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert inp.display is False  # hidden until "/" is pressed
+        await pilot.press("/")
+        await pilot.pause()
+        assert inp.display is True
+        assert screen.focused is inp
+
+
+def _chip_glyph_style(content: Text, family: str) -> str | None:
+    """The rendered style of `family`'s '●' chip glyph in `#detail-chips`'s Text.
+    `_render_chips` colors only the leading '●' per family (the label/count trail
+    that follows is plain, unstyled text) -- so `Text.from_markup` produces exactly
+    one Span per family, covering just that glyph, and the spans appear in the same
+    left-to-right order as `_FAMILIES` (the loop `_render_chips` builds the markup
+    from) -- confirmed empirically against the installed `rich` wheel. Mirrors
+    `test_drilldown_renders_card_and_newest_first_table`'s `topics[i].style ==
+    topic_color(...)` pattern, but chips join several colored runs into one Text
+    instead of one color per cell, hence indexing into `.spans` rather than `.style`."""
+    idx = detail_module._FAMILIES.index(family)
+    return content.spans[idx].style
+
+
+def test_number_key_toggles_family_and_updates_chips(tmp_path):
+    asyncio.run(_number_toggles(tmp_path))
+
+
+async def _number_toggles(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        t = screen.query_one("#detail-log", DataTable)
+        before = t.row_count
+        assert "value" in screen._enabled
+        await pilot.press("2")  # toggle the "value" family off
+        await pilot.pause()
+        assert "value" not in screen._enabled
+        assert t.row_count < before
+        content = screen.query_one("#detail-chips", Static).content
+        assert isinstance(content, Text)
+        # dim: the toggled-off family's glyph renders in the dim color, not its
+        # normal topic color -- this fails if `_render_chips`'s on/off branch breaks
+        assert _chip_glyph_style(content, "value") == "grey37"
+        await pilot.press("2")  # toggle it back on
+        await pilot.pause()
+        assert "value" in screen._enabled
+        assert t.row_count == before
+        content = screen.query_one("#detail-chips", Static).content
+        assert isinstance(content, Text)
+        # lit: back to its normal topic color once re-enabled
+        assert _chip_glyph_style(content, "value") == topic_color("value.")
+
+
+def test_escape_in_filter_cancels_not_pops(tmp_path):
+    asyncio.run(_escape_cancels_filter(tmp_path))
+
+
+async def _escape_cancels_filter(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+        before = t.row_count
+
+        screen.action_filter()  # reveals + focuses the filter Input
+        await pilot.pause()
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert screen.focused is inp
+
+        screen._filter_text = "control"  # simulate a half-typed filter
+        screen._render_window()
+        assert t.row_count < before  # confirms the filter actually narrowed first
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.screen is screen  # still the DrillDownScreen -- not popped
+        assert screen._filter_text == ""
+        assert inp.display is False
+        assert t.row_count == before  # unfiltered again
+
+
+def test_escape_pops_when_filter_not_focused(tmp_path):
+    asyncio.run(_escape_pops_unfocused(tmp_path))
+
+
+async def _escape_pops_unfocused(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert screen.focused is not inp  # the log table holds focus by default
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, DrillDownScreen)  # popped, unchanged behavior
 
 
 def test_drilldown_snapshot(snap_compare, tmp_path):
-    # SVG snapshot of the drill-down layout (headless). First run writes the baseline;
-    # subsequent runs diff against it. Run `uv run pytest --snapshot-update` to refresh
-    # after an intentional layout change.
-    #
-    # snap_compare's installed signature (pytest-textual-snapshot 1.1.0) takes an App
-    # instance directly (or a path) plus an optional `run_before(pilot)` coroutine run
-    # before the screenshot — used here to poll until the header/log have populated,
-    # the same convergence loop as the behavioral test above, so the baseline is captured
-    # in a settled state rather than mid-fold.
-    ref = _sqlite_rich(tmp_path)
-
-    from textual.app import App, ComposeResult
-    from textual.widgets import Static as S
-
-    class Host(App[None]):
-        def compose(self) -> ComposeResult:
-            yield S("host")
-
-        def on_mount(self) -> None:
-            self.push_screen(DrillDownScreen(ref, Env(clock=lambda: 150.0), tick_interval=0.05))
+    """Layout snapshot for the redesigned DrillDownScreen (task-7-brief.md): the
+    two-region shell (compact card + newest-first colored/zebra log table + chips +
+    footer) over `_seed_rich`, following the `snap_compare` convention established in
+    `tests/scenarios/test_table_plane.py` -- the prior flat-text drilldown snapshot was
+    removed by the redesign (task-3); this is its replacement, sized like this file's
+    other DrillDownScreen tests (90, 22)."""
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
 
     async def _settle(pilot):
-        # query via the app's active screen, not `app.query_one(...)` — see the NOTE
-        # in the behavioral test above for why the App-level query is the wrong tool
-        # once a second screen has been pushed.
-        screen = pilot.app.screen
         for _ in range(60):
             await pilot.pause(0.02)
-            head = str(screen.query_one("#detail-head", Static).content)
-            log_lines = screen.query_one("#detail-log", RichLog).lines
-            if "local://h/1" in head and len(log_lines) >= 3:
-                break
+            screen = pilot.app.screen
+            if isinstance(screen, DrillDownScreen):
+                t = screen.query_one("#detail-log", DataTable)
+                if t.row_count == 5:
+                    break
 
-    assert snap_compare(Host(), run_before=_settle)
+    assert snap_compare(app, run_before=_settle, terminal_size=(90, 22))

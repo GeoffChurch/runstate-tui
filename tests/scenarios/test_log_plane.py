@@ -3,35 +3,44 @@
 `DrillDownScreen`'s live incremental raw-envelope log tail (cursor + `read_log_delta`,
 manual-tick driven).
 
+REBUILT against the Task-3 tabular redesign: the original (pre-Task-3) version of this
+file drove an old `RichLog`-backed screen (`git show 9233b11:tests/scenarios/
+test_log_plane.py`) and was deleted as a side-effect of the RichLog->DataTable rewrite
+(Task 3). Every scenario below is the SAME behavior, re-asserted against the CURRENT
+shape: the `#detail-log` `DataTable` (newest-first; column 0 = seq) and the
+`#detail-card` `Static` (a 2-line `Text`; line 1 carries the status label). Two
+scenarios from the original file are intentionally NOT duplicated here: `pop-mid-tick`
+(already ported forward to `tests/test_detail.py::test_pop_mid_tick_does_not_crash`)
+and `unobserved-topics` completeness (rebuilt as `tests/test_detail.py::
+test_unknown_family_topics_always_shown_in_render_window`, which discriminates the
+restrict-to-vs-subtractive `_predicate` bug that a plain "still shows" test can't).
+
 Every assertion here was set from the screen's ACTUAL output (verified empirically, not
-guessed) -- a regression test's "expected" IS the current behavior. Where a scenario
-exposes a known-deferred gap (per the notes doc), the test still locks the CURRENT
-behavior and names the gap in a `# FINDING:` comment; it does not try to fix it. No
-production code is changed here.
+guessed) -- a regression test's "expected" IS the current behavior.
 
 The manual-tick discipline: every screen below is built with `tick_interval=999.0` so
-its own timer never fires unsupervised, and is driven by `advance_tick` (tests/helpers.py)
-for exact append-vs-tick ordering. `on_mount` fires ONE automatic first tick -- `_settle`
-below waits for it (`pilot.pause()` THEN `workers.wait_for_complete()`) before any manual
-`advance_tick`, else the exclusive `_refresh` worker cancellation races (see test_detail.py
-/ test_helpers.py, which pin the same idiom). Header/log are queried off the pushed
-`screen`, never `app.query_one(...)` -- see test_detail.py's NOTE for why."""
+its own timer never fires unsupervised, and is driven by `advance_tick`
+(tests/helpers.py) for exact append-vs-tick ordering. `on_mount` fires ONE automatic
+first tick -- `_settle` below waits for it (`pilot.pause()` THEN
+`workers.wait_for_complete()`) before any manual `advance_tick`, else the exclusive
+`_refresh` worker cancellation races (see test_detail.py / test_helpers.py, which pin
+the same idiom). Card/log are queried off the pushed `screen`, never
+`app.query_one(...)` -- see test_detail.py's NOTE for why."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import threading
-import time
 
+from rich.text import Text
 from runstate import open_channel
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static
+from textual.coordinate import Coordinate
+from textual.widgets import DataTable, Static
 
-from runstate_tui import detail as detail_module
 from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
-from tests.helpers import advance_tick, corrupt_seq, log_text
+from tests.helpers import advance_tick, corrupt_seq
 
 
 class _Host(App[None]):
@@ -69,12 +78,27 @@ async def _settle(pilot, screen):
     await pilot.app.workers.wait_for_complete()
 
 
-def _head(screen):
-    return str(screen.query_one("#detail-head", Static).content)
+def _card_text(screen) -> str:
+    return str(screen.query_one("#detail-card", Static).content)
 
 
-def _log(screen):
-    return log_text(screen.query_one("#detail-log", RichLog))
+def _rows(screen) -> list[tuple[str, str, str, str]]:
+    """Every row currently in the log `DataTable`, in TABLE order (newest-first,
+    per `_render_window`) -- (seq, topic, request, body), topic un-styled."""
+    t = screen.query_one("#detail-log", DataTable)
+    out = []
+    for r in range(t.row_count):
+        seq = t.get_cell_at(Coordinate(r, 0))
+        topic = t.get_cell_at(Coordinate(r, 1))
+        topic = topic.plain if isinstance(topic, Text) else topic
+        request = t.get_cell_at(Coordinate(r, 2))
+        body = t.get_cell_at(Coordinate(r, 3))
+        out.append((seq, topic, request, body))
+    return out
+
+
+def _seqs(screen) -> list[int]:
+    return [int(seq) for seq, *_ in _rows(screen)]
 
 
 # --- cold open / delta boundary --------------------------------------------------
@@ -99,11 +123,12 @@ async def _cold_open_full_drain(tmp_path):
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
         await app.push_screen(screen)
         await _settle(pilot, screen)  # the automatic on_mount tick IS the first real tick
-        lines = _log(screen)
-        assert len(lines) == 3  # ALL 3 pre-existing records -- not a tail-seek to the end
-        assert "lifecycle.started" in lines[0]
-        assert "lifecycle.heartbeat" in lines[1]
-        assert "lifecycle.heartbeat" in lines[2]
+        rows = _rows(screen)
+        assert len(rows) == 3  # ALL 3 pre-existing records -- not a tail-seek to the end
+        assert _seqs(screen) == [3, 2, 1]  # newest-first
+        assert rows[2][1] == "lifecycle.started"  # oldest (seq 1) is the LAST row
+        assert rows[1][1] == "lifecycle.heartbeat"
+        assert rows[0][1] == "lifecycle.heartbeat"  # newest (seq 3) is the FIRST row
         assert screen._cursor == 3  # cursor caught all the way up to last_seq()
 
 
@@ -123,9 +148,9 @@ async def _append_before_tick_included(tmp_path):
         hb = {"step": 1, "consumed_seq": 0, "t": 2.0}
         _append(tmp_path, "abt", hb, topic="lifecycle.heartbeat")
         await advance_tick(pilot, screen)  # the append landed BEFORE this tick
-        lines = _log(screen)
-        assert len(lines) == 2
-        assert "lifecycle.heartbeat" in lines[1]  # this tick's delta included it
+        rows = _rows(screen)
+        assert len(rows) == 2
+        assert rows[0][1] == "lifecycle.heartbeat"  # this tick's delta included it, on TOP
         assert screen._cursor == 2
 
 
@@ -144,18 +169,18 @@ async def _tick_before_append_deferred(tmp_path):
 
         await advance_tick(pilot, screen)  # a tick with nothing new to drain
         assert screen._cursor == 1
-        assert len(_log(screen)) == 1
+        assert len(_rows(screen)) == 1
 
         hb = {"step": 1, "consumed_seq": 0, "t": 2.0}
         _append(tmp_path, "tba", hb, topic="lifecycle.heartbeat")
         # the two-directional delta boundary: BETWEEN the append and the next tick,
-        # the pane and cursor must NOT have moved just because a record landed on disk.
+        # the window and cursor must NOT have moved just because a record landed on disk.
         assert screen._cursor == 1
-        assert len(_log(screen)) == 1
+        assert len(_rows(screen)) == 1
 
         await advance_tick(pilot, screen)  # only NOW does the next tick pick it up
         assert screen._cursor == 2
-        assert len(_log(screen)) == 2
+        assert len(_rows(screen)) == 2
 
 
 def test_batch_append_in_one_gap(tmp_path):
@@ -170,7 +195,7 @@ async def _batch_append_in_one_gap(tmp_path):
         await app.push_screen(screen)
         await _settle(pilot, screen)
         assert screen._cursor == 0
-        assert _log(screen) == []
+        assert _rows(screen) == []
 
         for step in range(5):
             _append(
@@ -180,10 +205,9 @@ async def _batch_append_in_one_gap(tmp_path):
                 topic="lifecycle.heartbeat",
             )
         await advance_tick(pilot, screen)  # all 5 land in ONE gap before this tick
-        lines = _log(screen)
-        assert len(lines) == 5  # one batched delta, not 5 separate ticks
-        seqs = [int(line.split()[0]) for line in lines]
-        assert seqs == [1, 2, 3, 4, 5]  # seq order preserved
+        rows = _rows(screen)
+        assert len(rows) == 5  # one batched delta, not 5 separate ticks
+        assert _seqs(screen) == [5, 4, 3, 2, 1]  # newest-first, seq order preserved
         assert screen._cursor == 5
 
 
@@ -204,27 +228,29 @@ async def _ring_eviction(tmp_path):
     async with app.run_test() as pilot:
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0, log_cap=5)
         await app.push_screen(screen)
-        await _settle(pilot, screen)  # one drain of all 8, evicted down to the RichLog's cap
-        lines = _log(screen)
-        assert len(lines) == 5
-        seqs = [int(line.split()[0]) for line in lines]
-        assert seqs == [4, 5, 6, 7, 8]  # only the last 5 physically survive
-        assert screen._cursor == 8  # cursor watermark is NOT capped -- pane and cursor diverge
+        await _settle(pilot, screen)  # one drain of all 8, evicted down to the window's cap
+        rows = _rows(screen)
+        assert len(rows) == 5
+        assert screen.query_one("#detail-log", DataTable).row_count == 5  # bounded, deque(maxlen)
+        assert _seqs(screen) == [8, 7, 6, 5, 4]  # only the last 5 physically survive
+        assert screen._cursor == 8  # cursor watermark is NOT capped -- window and cursor diverge
 
 
-def test_embedded_newline_splits(tmp_path):
-    asyncio.run(_embedded_newline_splits(tmp_path))
+def test_one_envelope_is_one_row(tmp_path):
+    # format_envelope-era invariant, ported to the tabular design (replaces the old
+    # RichLog `embedded_newline_splits` scenario): a normal dict body's string values
+    # are already `repr()`'d as part of `str(dict)`, but an alien NON-dict body -- e.g.
+    # a bare JSON string, planted here via corrupt_seq -- is interpolated raw by
+    # `_body_text`. Under the old RichLog, a real embedded newline would split ONE
+    # envelope's line into two physical lines. The DataTable has no such failure mode:
+    # `_render_window` calls `add_row` exactly once per envelope in the window, so one
+    # envelope is structurally always exactly one table ROW, regardless of what a
+    # multi-line cell renders as internally. This test locks that invariant against the
+    # REAL widget (not just the construction), and pins the raw (unescaped) cell value.
+    asyncio.run(_one_envelope_is_one_row(tmp_path))
 
 
-async def _embedded_newline_splits(tmp_path):
-    # format_envelope single-lines its output. A normal dict body's string values
-    # are `repr()`'d as part of `str(dict)` (an embedded "\n" prints as the two
-    # literal characters backslash-n), but an alien NON-dict body -- e.g. a bare
-    # JSON string, planted here via corrupt_seq -- would otherwise be interpolated
-    # RAW (`f"...{env.body}"`, no repr()): a real embedded newline character would
-    # survive into the formatted line and RichLog.write would split it into
-    # multiple physical lines for what is really ONE envelope. format_envelope
-    # escapes \n/\r/\t so this can't happen: one envelope is always one line.
+async def _one_envelope_is_one_row(tmp_path):
     ref = _sqlite_run(tmp_path, "nl", [({"handle": "h1", "t": 1.0}, "launcher.launched", None)])
     corrupt_seq(tmp_path, "nl", 1, literal=json.dumps("line one\nline two"))
     app = _Host()
@@ -232,56 +258,27 @@ async def _embedded_newline_splits(tmp_path):
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
         await app.push_screen(screen)
         await _settle(pilot, screen)
-        lines = _log(screen)
-        # ONE envelope on the log renders as exactly ONE physical RichLog line --
-        # the embedded newline is escaped, not raw, so it can't split the line.
-        assert len(lines) == 1
-        assert "line one\\nline two" in lines[0]
+        t = screen.query_one("#detail-log", DataTable)
+        # ONE envelope on the log is exactly ONE DataTable row -- never split.
+        assert t.row_count == 1
+        rows = _rows(screen)
+        assert len(rows) == 1
+        assert rows[0][1] == "launcher.launched"
+        assert rows[0][3] == "line one\nline two"  # the raw body, embedded newline intact
 
 
-# --- fold-visibility of the raw tail ------------------------------------------------
-
-
-def test_unobserved_topics_only_in_tail(tmp_path):
-    asyncio.run(_unobserved_topics_only_in_tail(tmp_path))
-
-
-async def _unobserved_topics_only_in_tail(tmp_path):
-    # nak / launcher.launched / control.unsubscribe records: each is read by SOME
-    # fold sub-query (last_activity touches launcher.launched; live_demand touches
-    # nak and unsubscribe to discharge a pending subscribe) -- but none is ever
-    # RENDERED as a raw envelope in the header (format_detail only echoes
-    # undischarged_stops / live_demand *survivors*, and none of these three is one).
-    # The raw tail streams every record regardless.
-    ref = _sqlite_run(
-        tmp_path,
-        "unobs",
-        [
-            (
-                {"reason": "unsatisfiable", "message": "NAK-MARKER"},
-                "lifecycle.nak",
-                None,
-                "req-nak",
-            ),
-            ({"handle": "LAUNCH-MARKER", "t": 1.0}, "launcher.launched", None, "req-launch"),
-            ({}, "control.unsubscribe", None, "UNSUB-MARKER"),
-        ],
-    )
-    app = _Host()
-    async with app.run_test() as pilot:
-        screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
-        await app.push_screen(screen)
-        await _settle(pilot, screen)
-        head = _head(screen)
-        lines = _log(screen)
-        joined = "\n".join(lines)
-        assert len(lines) == 3
-        for marker in ("NAK-MARKER", "LAUNCH-MARKER", "UNSUB-MARKER"):
-            assert marker not in head  # the header excludes them
-            assert marker in joined  # the raw tail includes them
+# --- delta-read failure / header-tail coherence ------------------------------------
 
 
 def test_byte_torn_in_delta(tmp_path):
+    # This is the scenario that DISCRIMINATES the incremental delta-cursor worker
+    # (Task 4) from Task 3's interim synchronous fill: the synchronous fill re-reads
+    # `after=0` (the WHOLE log) every tick and unconditionally `window.clear()`s, so
+    # once a tear appears ANYWHERE in the log -- even behind already-drained,
+    # already-displayed good records -- the very next tick wipes the window down to
+    # EMPTY. The incremental worker only re-reads `after=self._cursor` (the NEW tail)
+    # and only touches the window `if delta:` -- so a torn delta (`read_log_delta`
+    # returns `[]`) leaves the previously-drained good records exactly where they are.
     asyncio.run(_byte_torn_in_delta(tmp_path))
 
 
@@ -301,34 +298,28 @@ async def _byte_torn_in_delta(tmp_path):
         await app.push_screen(screen)
         await _settle(pilot, screen)  # the clean drain
         assert screen._cursor == 2
-        assert len(_log(screen)) == 2
+        assert len(_rows(screen)) == 2
 
         # AFTER the drain: two more launcher.launched records land -- the OLDER
-        # (seq 3) is torn, the NEWER (seq 4) stays clean. The header's last_activity
-        # reads ONLY `latest(LAUNCHER_LAUNCHED)` -- a single-row, highest-seq query --
-        # so it never touches seq 3's body at all: the topic IS fold-observed in
-        # general, but this specific (older, superseded) record is fold-invisible.
+        # (seq 3) is torn, the NEWER (seq 4) stays clean.
         _append(tmp_path, "torndelta", {"handle": "old", "t": 3.0}, topic="launcher.launched")
         _append(tmp_path, "torndelta", {"handle": "new", "t": 4.0}, topic="launcher.launched")
         corrupt_seq(tmp_path, "torndelta", 3)  # byte-torn -- default literal="{not json"
 
         await advance_tick(pilot, screen)
         # read_log_delta's RAW sequential read (after=2) hits the torn seq 3 partway
-        # through and drops the WHOLE batched delta -- seq 4 too, not just the torn
+        # through and returns [] for the WHOLE delta -- seq 4 too, not just the torn
         # record (table.py's documented TODO: no partial passthrough yet).
-        assert len(_log(screen)) == 2  # unchanged -- nothing new appeared this tick
-        assert screen._cursor == 2  # unchanged -- the delta never advanced it
-        assert "corrupt" not in _head(screen).lower()  # header stayed clean -- NO crash
+        assert len(_rows(screen)) == 2  # unchanged -- nothing new appeared this tick
+        assert screen._cursor == 2  # unchanged -- the empty delta never advanced it
+        assert "corrupt" not in _card_text(screen).lower()  # header stayed clean -- NO crash
 
 
-# --- header/tail coherence across a status change -----------------------------------
+def test_card_status_flips_live_to_terminal(tmp_path):
+    asyncio.run(_card_status_flips_live_to_terminal(tmp_path))
 
 
-def test_header_status_flips_live_to_terminal(tmp_path):
-    asyncio.run(_header_status_flips_live_to_terminal(tmp_path))
-
-
-async def _header_status_flips_live_to_terminal(tmp_path):
+async def _card_status_flips_live_to_terminal(tmp_path):
     ref = _sqlite_run(
         tmp_path,
         "flips",
@@ -342,7 +333,8 @@ async def _header_status_flips_live_to_terminal(tmp_path):
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
         await app.push_screen(screen)
         await _settle(pilot, screen)
-        assert _head(screen).startswith("live")
+        line1 = _card_text(screen).split("\n")[0]
+        assert line1.startswith("● live")
 
         _append(
             tmp_path,
@@ -351,8 +343,9 @@ async def _header_status_flips_live_to_terminal(tmp_path):
             topic="lifecycle.stopped",
         )
         await advance_tick(pilot, screen)
-        assert _head(screen).startswith("done")  # completed -> the "done" display label
-        assert any("lifecycle.stopped" in line for line in _log(screen))  # AND in the tail
+        line1 = _card_text(screen).split("\n")[0]
+        assert line1.startswith("● done")  # completed -> the "done" display label
+        assert _rows(screen)[0][1] == "lifecycle.stopped"  # AND on top of the tail
 
 
 def test_re_entry_resets_cursor(tmp_path):
@@ -369,7 +362,7 @@ async def _re_entry_resets_cursor(tmp_path):
         await app.push_screen(screen1)
         await _settle(pilot, screen1)
         assert screen1._cursor == 1
-        assert len(_log(screen1)) == 1
+        assert len(_rows(screen1)) == 1
 
         await app.pop_screen()
         await pilot.pause()
@@ -385,7 +378,7 @@ async def _re_entry_resets_cursor(tmp_path):
         # full re-drain from seq 0 -- both the original record and the one appended
         # while unwatched -- not a resume from screen1's old cursor.
         assert screen2._cursor == 2
-        assert len(_log(screen2)) == 2
+        assert len(_rows(screen2)) == 2
 
 
 def test_sqlite_wal_held_writer(held_writer_sqlite_run):
@@ -400,62 +393,9 @@ async def _sqlite_wal_held_writer(held_writer_sqlite_run):
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
         await app.push_screen(screen)
         await _settle(pilot, screen)  # a fresh reader connection sees the held writer's commit
-        assert len(_log(screen)) == 1
+        assert len(_rows(screen)) == 1
 
         send({"step": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat")
         await advance_tick(pilot, screen)  # each tick opens its OWN fresh reader
-        assert len(_log(screen)) == 2
+        assert len(_rows(screen)) == 2
         assert screen._cursor == 2
-
-
-# --- pop mid-tick (teardown race) ---------------------------------------------------
-
-
-def test_pop_mid_tick_does_not_crash(tmp_path, monkeypatch):
-    # Covers detail.py's teardown guard (_TEARDOWN_ERRORS / _marshal's try/except):
-    # a pop mid-tick can race _refresh's off-thread _marshal calls onto a torn-down
-    # screen. Deterministic instead of a blind sleep: render_single is patched to
-    # block on a threading.Event, so the pop is GUARANTEED to land while the tick
-    # is still mid-flight, and _marshal's call_from_thread calls are GUARANTEED to
-    # run only after the screen has been popped (confirmed empirically: this races
-    # self.app -- NoActiveAppError, a RuntimeError subclass already inside
-    # _TEARDOWN_ERRORS -- 100% of the time under this synchronization, not
-    # occasionally). Mirrors test_app.py's stop-teardown discipline: the
-    # threading.excepthook is installed OUTSIDE asyncio.run so it survives loop
-    # teardown, in case anything escapes _marshal's own guard.
-    errors: list[str] = []
-    old_hook = threading.excepthook
-    threading.excepthook = lambda a: errors.append(a.exc_type.__name__)
-    try:
-        asyncio.run(_pop_mid_tick(tmp_path, monkeypatch))
-        time.sleep(0.2)  # let any teardown exception on the tick's thread fire
-    finally:
-        threading.excepthook = old_hook
-    assert errors == [], f"tick thread raised at teardown: {errors}"
-
-
-async def _pop_mid_tick(tmp_path, monkeypatch):
-    ref = _sqlite_run(tmp_path, "popmid", [({"handle": "h1", "t": 1.0}, "lifecycle.started", None)])
-    entered = threading.Event()
-    release = threading.Event()
-    orig_render_single = detail_module.render_single
-
-    def slow_render_single(ref, env):
-        entered.set()
-        release.wait(2.0)  # keep the tick in-flight until after the pop below
-        return orig_render_single(ref, env)
-
-    monkeypatch.setattr(detail_module, "render_single", slow_render_single)
-
-    app = _Host()
-    async with app.run_test() as pilot:
-        screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=0.02)
-        await app.push_screen(screen)  # on_mount fires the first tick
-        for _ in range(200):
-            await pilot.pause(0.01)
-            if entered.is_set():
-                break
-        assert entered.is_set(), "the tick never entered render_single -- can't test the race"
-        await app.pop_screen()  # pop WHILE render_single is still blocked mid-tick
-        release.set()  # let the in-flight tick proceed -> its _marshal calls now race the pop
-        await pilot.pause(0.3)  # give the worker thread time to finish and marshal (or not crash)

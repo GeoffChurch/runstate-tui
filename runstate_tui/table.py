@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 from runstate import open_channel
@@ -115,11 +116,17 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
         channel.close()
 
 
-def read_log_delta(ref: RunRef, after: int, *, limit: int | None = None) -> list[Envelope]:
-    """The raw log tail as a query: envelopes with seq > `after`. Filter-shaped for
-    later (topics/name/request_ids). Missing/unreadable/substrate-fault/byte-torn -> []
-    (the header carries the run's status, including the loud `corrupt` verdict, via
-    render_single/open_and_fold)."""
+def read_log_delta(
+    ref: RunRef,
+    after: int,
+    *,
+    filter: Callable[[Envelope], bool] | None = None,
+    limit: int | None = None,
+) -> list[Envelope]:
+    """The raw log tail as a query: envelopes with seq > `after`, optionally narrowed
+    by `filter`. Missing/unreadable/substrate-fault/byte-torn -> [] (the header carries
+    the run's status, including the loud `corrupt` verdict, via render_single/
+    open_and_fold)."""
     run_id, root, backend = ref
     if backend == "sqlite":
         try:
@@ -131,7 +138,7 @@ def read_log_delta(ref: RunRef, after: int, *, limit: int | None = None) -> list
     except _OPEN_ERRORS:
         return []
     try:
-        return channel.read(after=after, limit=limit)
+        got = channel.read(after=after, limit=limit)
     except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError, json.JSONDecodeError):
         # substrate fault or byte-torn mid-read -> []. TODO(follow-up): a byte-torn
         # tail could instead raw-passthrough everything up to the tear rather than
@@ -140,6 +147,37 @@ def read_log_delta(ref: RunRef, after: int, *, limit: int | None = None) -> list
         return []
     finally:
         channel.close()
+    # UPSTREAM(runstate#15): v1 applies the predicate here in Python. When runstate's
+    # read() gains filter= (+ before=/max_seq= for backward reads), push `filter` into
+    # channel.read so the SUBSTRATE filters and history is retroactively filterable.
+    # Discover all revisit sites with: grep -rn "UPSTREAM(runstate#15)"
+    return [e for e in got if filter is None or filter(e)]
+
+
+def envelope_filter(text: str, hidden_families: set[str]) -> Callable[[Envelope], bool]:
+    """Build a v1 log-filter predicate from the filter-bar text + the toggled-off
+    (hidden) topic families. text: a plain substring matched against topic +
+    request_id (+ 'step>N' numeric bound over the body's 'step'). hidden_families:
+    topic families to HIDE (the toggled-off KNOWN families) — a topic whose family
+    is NOT in this set always shows, so launcher.* / any unclassified topic is never
+    silently dropped (the log streams every record). The daemon/upstream #15 will
+    serve this as read(filter=…)."""
+    text = text.strip()
+    stepbound: int | None = None
+    if text.startswith("step>") and text[5:].strip().isdigit():
+        stepbound = int(text[5:].strip())
+
+    def pred(e: Envelope) -> bool:
+        if e.topic.split(".")[0] in hidden_families:  # subtractive: hide toggled-off known families
+            return False
+        if stepbound is not None:
+            step = e.body.get("step") if isinstance(e.body, dict) else None
+            return isinstance(step, int) and step > stepbound
+        if text and text not in e.topic and text not in (e.request_id or ""):
+            return False
+        return True
+
+    return pred
 
 
 def render_table(resolver: Resolver, env: Env) -> list[Row]:

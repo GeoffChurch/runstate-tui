@@ -141,19 +141,24 @@ def test_held_writer_sqlite_run_stays_open_and_appends_live(held_writer_sqlite_r
         reader.close()
 
 
-def test_advance_tick_runs_a_manual_tick_and_log_text_reads_it(tmp_path):
-    asyncio.run(_advance_tick_and_log_text(tmp_path))
+def test_advance_tick_runs_a_manual_tick_and_the_table_reads_it(tmp_path):
+    # NOTE (drill-down redesign): `#detail-log` moved from a RichLog to a keyed
+    # DataTable (runstate_tui/detail.py) -- this test's job is only to pin that
+    # `advance_tick` (the reusable helper) still fires a real manual tick against
+    # DrillDownScreen's new shell; `log_text` (RichLog-only) no longer applies here.
+    asyncio.run(_advance_tick_and_table(tmp_path))
 
 
-async def _advance_tick_and_log_text(tmp_path):
+async def _advance_tick_and_table(tmp_path):
     from runstate import open_channel
     from textual.app import App, ComposeResult
-    from textual.widgets import RichLog
+    from textual.coordinate import Coordinate
+    from textual.widgets import DataTable
     from textual.widgets import Static as S
 
     from runstate_tui.detail import DrillDownScreen
     from runstate_tui.env import Env
-    from tests.helpers import advance_tick, log_text
+    from tests.helpers import advance_tick
 
     ch = open_channel("adv", root=tmp_path, backend="sqlite")
     ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
@@ -176,5 +181,6 @@ async def _advance_tick_and_log_text(tmp_path):
         await pilot.pause()
         await pilot.app.workers.wait_for_complete()
         await advance_tick(pilot, screen)
-        lines = log_text(screen.query_one("#detail-log", RichLog))
-        assert any("local://h/1" in line for line in lines)
+        t = screen.query_one("#detail-log", DataTable)
+        assert t.row_count == 1
+        assert "local://h/1" in t.get_cell_at(Coordinate(0, 3))  # body column

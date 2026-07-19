@@ -198,3 +198,54 @@ def test_fold_open_channel_maps_byte_torn_to_corrupt(tmp_path):
     ch = open_channel("r", root=tmp_path, backend="sqlite")
     assert fold_open_channel(ch, _env(150.0)).status.kind is StatusKind.CORRUPT
     ch.close()
+
+
+def test_read_log_delta_applies_filter(tmp_path):
+    from runstate import open_channel
+
+    from runstate_tui.table import read_log_delta
+
+    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    ch.send({}, topic="control.stop", request_id="webui:x")
+    ch.close()
+    ref = ("r", str(tmp_path), "sqlite")
+    only_control = read_log_delta(ref, after=0, filter=lambda e: e.topic.startswith("control."))
+    assert [e.topic for e in only_control] == ["control.stop"]
+    all_e = read_log_delta(ref, after=0)  # filter=None -> unchanged behavior
+    assert len(all_e) == 2
+
+
+def test_envelope_filter_text_and_families():
+    from types import SimpleNamespace as NS
+
+    from runstate_tui.table import envelope_filter
+
+    started = NS(topic="lifecycle.started", request_id=None, body={"t": 1.0})
+    stop = NS(topic="control.stop", request_id="webui:x", body={})
+    f_text = envelope_filter("control", set())
+    assert f_text(stop) and not f_text(started)  # substring over topic/request
+    f_req = envelope_filter("webui:x", set())
+    assert f_req(stop) and not f_req(started)  # matches request_id
+    f_hide = envelope_filter("", {"control"})  # subtractive: hide "control"
+    assert f_hide(started) and not f_hide(stop)
+    f_none = envelope_filter("", set())
+    assert f_none(started) and f_none(stop)  # nothing hidden -> everything
+
+
+def test_unknown_family_topics_always_shown():
+    # Finding #1: envelope_filter's family param is subtractive (HIDE the toggled-off
+    # KNOWN families), never restrict-to -- a topic outside the known families (e.g.
+    # launcher.* written onto the same channel by runstate's Launcher) is never in
+    # `hidden_families`, so it is never silently dropped, no matter which known
+    # families are toggled off.
+    from types import SimpleNamespace as NS
+
+    from runstate_tui.table import envelope_filter
+
+    launcher = NS(topic="launcher.terminated", request_id=None, body={})
+    # hide every known family the app knows about -- launcher.* still shows
+    f = envelope_filter("", {"lifecycle", "value", "control"})
+    assert f(launcher)
+    # even with nothing hidden, unknown-family topics show too (sanity)
+    assert envelope_filter("", set())(launcher)

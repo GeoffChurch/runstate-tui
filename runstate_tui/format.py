@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from rich.text import Text
 from runstate.channel import Envelope
 from runstate.observables import Outcome
 
 from .types import Row, Status, StatusKind
 
+_TOPIC_COLORS = {"lifecycle": "#539bf5", "control": "#d29922", "value": "#3fb950"}
 _STATUS_COLORS = {
     StatusKind.LIVE: "#3fb950",
     StatusKind.STALE: "#d29922",
@@ -35,6 +37,12 @@ def status_color(status: Status) -> str:
     return _STATUS_COLORS.get(status.kind, "#8b949e")
 
 
+def topic_color(topic: str) -> str:
+    """A hex color for a log topic, by family (mirrors status_color). Redundant with
+    the topic text — never the sole signal."""
+    return _TOPIC_COLORS.get(topic.split(".")[0], "#8b949e")
+
+
 def format_row(row: Row) -> str:
     """Render a Row as one human line; absent factors are omitted."""
     label = row.status.label
@@ -57,6 +65,27 @@ def format_row(row: Row) -> str:
     return "  ".join(parts)
 
 
+def format_summary_card(row: Row) -> Text:
+    """The drill-down's compact 2-line header card: the one-line summary (with the
+    status dot) + episode and COUNTS. The full stop/demand/issue lists live in the
+    enter-expand, not here."""
+    line1 = Text()
+    line1.append("● ", style=status_color(row.status))  # a Span on an unstyled base, so the
+    # summary appended next does NOT inherit the color (Text(text, style=X) sets the base
+    # style, which every subsequently-appended plain segment inherits at render time --
+    # see test_summary_card_colors_only_the_dot_not_the_whole_line).
+    line1.append(format_row(row))  # the existing one-line summary
+    parts = [f"episode {row.episode}" if row.episode else "episode —"]
+    if row.undischarged_stops:
+        parts.append(f"■ {len(row.undischarged_stops)} stop pending")
+    if row.live_demand:
+        parts.append(f"◆ {len(row.live_demand)} demand")
+    if row.issues:
+        parts.append(f"⚠ {len(row.issues)} issue" + ("s" if len(row.issues) != 1 else ""))
+    line2 = Text("     ".join(parts))
+    return Text("\n").join([line1, line2])
+
+
 def format_envelope(env: Envelope) -> str:
     """One compact line for the raw log tail: seq, topic, request_id?, body.
 
@@ -74,19 +103,3 @@ def format_envelope(env: Envelope) -> str:
     body = str(env.body)
     line = f"{env.seq:>5}  {env.topic:<20}{rid}  {body}"
     return line.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-
-def format_detail(row: Row) -> str:
-    """The drill-down header: every Row factor + full issues + stops + demand. Pure."""
-    lines = [format_row(row)]  # the one-line summary at the top
-    lines.append(f"episode: {row.episode}" if row.episode else "episode: —")
-    if row.undischarged_stops:
-        lines.append(f"undischarged stops ({len(row.undischarged_stops)}):")
-        lines += [f"  {format_envelope(e)}" for e in row.undischarged_stops]
-    if row.live_demand:
-        lines.append(f"live demand ({len(row.live_demand)}):")
-        lines += [f"  {format_envelope(e)}" for e in row.live_demand]
-    if row.issues:
-        lines.append("issues:")
-        lines += [f"  ⚠ {i.message}" for i in row.issues]
-    return "\n".join(lines)

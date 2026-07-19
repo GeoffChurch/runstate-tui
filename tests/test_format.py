@@ -4,6 +4,12 @@ from runstate_tui.format import format_row
 from runstate_tui.types import Issue, IssueKind, Row, Severity, Status
 
 
+def _env_stub():
+    from runstate.channel import Envelope
+
+    return Envelope(seq=1, topic="control.stop", name=None, request_id=None, body={})
+
+
 def _row(**kw):
     base = dict(
         status=Status.live(),
@@ -116,54 +122,6 @@ def test_format_envelope_normal_dict_body_unchanged():
     assert line == "    4  control.stop          webui:x  {'a': 1}"
 
 
-def test_format_detail_shows_all_factors_and_lists():
-    from runstate.channel import Envelope
-
-    from runstate_tui.format import format_detail
-
-    stop = Envelope(seq=5, topic="control.stop", name=None, request_id="webui:s", body={})
-    row = _row(
-        frontier=7,
-        value=("loss", 0.03, 7),
-        elapsed=50.0,
-        episode="local://h/1",
-        undischarged_stops=(stop,),
-    )
-    text = format_detail(row)
-    assert "local://h/1" in text  # episode
-    assert "loss" in text  # value
-    assert "webui:s" in text  # the undischarged stop
-    assert "undischarged stop" in text.lower()
-
-
-def test_format_detail_shows_live_demand_and_issues_no_episode():
-    from runstate.channel import Envelope
-
-    from runstate_tui.format import format_detail
-
-    sub = Envelope(seq=3, topic="control.subscribe", name=None, request_id="webui:sub1", body={})
-    torn = Issue(
-        kind=IssueKind.MALFORMED,
-        severity=Severity.MEDIUM,
-        message="record malformed at seq 4012",
-        seq=4012,
-    )
-    row = _row(live_demand=(sub,), issues=(torn,))
-    text = format_detail(row)
-    assert "episode: —" in text
-    assert "webui:sub1" in text  # the live demand
-    assert "live demand" in text.lower()
-    assert "record malformed at seq 4012" in text
-
-
-def test_format_detail_shows_terminal_error_diagnostic():
-    from runstate_tui.format import format_detail
-
-    row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
-    text = format_detail(row)
-    assert "errored: OOM killed" in text
-
-
 def test_status_color_maps_kinds_and_outcomes():
     from runstate_tui.format import status_color
 
@@ -176,3 +134,68 @@ def test_status_color_maps_kinds_and_outcomes():
     assert status_color(Status.error()) == "#f85149"
     assert status_color(Status.terminal(Outcome.COMPLETED)) == "#539bf5"
     assert status_color(Status.terminal(Outcome.ERRORED)) == "#f85149"
+
+
+def test_topic_color_by_family():
+    from runstate_tui.format import topic_color
+
+    assert topic_color("lifecycle.started") == "#539bf5"
+    assert topic_color("control.stop") == "#d29922"
+    assert topic_color("value") == "#3fb950"
+    assert topic_color("something.else") == "#8b949e"
+
+
+def test_summary_card_colors_only_the_dot_not_the_whole_line():
+    # `Text("● ", style=X)` sets the Text's BASE style, which every subsequently
+    # appended plain-string segment inherits at render time (the Rich base-style-
+    # inheritance footgun -- the same class the multirun `_marker` chip guards
+    # against, see test_marker_undischarged_stop_alone_renders_neutral). That would
+    # paint the WHOLE first line (dot + status/step/loss summary) in the status
+    # color instead of just the dot, contradicting the design: the dot carries the
+    # color, the text stays uncolored (redundant signal, not a christmas tree).
+    # `Text.join` folds each joined Text's base style into an explicit Span over
+    # that Text's exact character range in the result, so this is checkable
+    # directly on `format_summary_card`'s returned Text without rendering to
+    # segments: a correctly-scoped fix produces exactly one Span, 2 characters
+    # wide ("● "), carrying the status color; a base-style leak instead produces
+    # one Span spanning the whole first line.
+    from rich.text import Span
+
+    from runstate_tui.format import format_summary_card, status_color
+
+    row = _row(
+        status=Status.live(),
+        frontier=7,
+        freshness=10.0,
+        value=("loss", 0.03, 7),
+        elapsed=50.0,
+    )
+    card = format_summary_card(row)
+    color = status_color(row.status)
+    assert color == "#3fb950"  # live -- pins the discriminating color from the bug report
+
+    assert card.spans == [Span(0, len("● "), color)]
+
+
+def test_summary_card_is_two_compact_lines_with_counts():
+    from rich.text import Text
+
+    from runstate_tui.format import format_summary_card
+
+    row = _row(  # a live run w/ 1 stop, 1 demand
+        status=Status.live(),
+        frontier=1450,
+        freshness=8.0,
+        value=("loss", 0.0123, 1450),
+        elapsed=20.0,
+        episode="local://h/1",
+        undischarged_stops=(_env_stub(),),  # len 1
+        live_demand=(_env_stub(),),  # len 1
+    )
+    card = format_summary_card(row)
+    assert isinstance(card, Text)
+    plain = card.plain
+    assert "live" in plain and "loss=0.0123" in plain  # line 1: the summary
+    assert "episode local://h/1" in plain  # line 2: episode
+    assert "1 stop pending" in plain and "1 demand" in plain  # line 2: COUNTS, not lists
+    assert plain.count("\n") == 1  # exactly two lines
