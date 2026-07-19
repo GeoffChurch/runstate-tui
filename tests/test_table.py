@@ -223,11 +223,29 @@ def test_envelope_filter_text_and_families():
 
     started = NS(topic="lifecycle.started", request_id=None, body={"t": 1.0})
     stop = NS(topic="control.stop", request_id="webui:x", body={})
-    f_text = envelope_filter("control", None)
+    f_text = envelope_filter("control", set())
     assert f_text(stop) and not f_text(started)  # substring over topic/request
-    f_req = envelope_filter("webui:x", None)
+    f_req = envelope_filter("webui:x", set())
     assert f_req(stop) and not f_req(started)  # matches request_id
-    f_fam = envelope_filter("", {"lifecycle"})  # families-only
-    assert f_fam(started) and not f_fam(stop)
-    f_none = envelope_filter("", None)
-    assert f_none(started) and f_none(stop)  # empty -> everything
+    f_hide = envelope_filter("", {"control"})  # subtractive: hide "control"
+    assert f_hide(started) and not f_hide(stop)
+    f_none = envelope_filter("", set())
+    assert f_none(started) and f_none(stop)  # nothing hidden -> everything
+
+
+def test_unknown_family_topics_always_shown():
+    # Finding #1: envelope_filter's family param is subtractive (HIDE the toggled-off
+    # KNOWN families), never restrict-to -- a topic outside the known families (e.g.
+    # launcher.* written onto the same channel by runstate's Launcher) is never in
+    # `hidden_families`, so it is never silently dropped, no matter which known
+    # families are toggled off.
+    from types import SimpleNamespace as NS
+
+    from runstate_tui.table import envelope_filter
+
+    launcher = NS(topic="launcher.terminated", request_id=None, body={})
+    # hide every known family the app knows about -- launcher.* still shows
+    f = envelope_filter("", {"lifecycle", "value", "control"})
+    assert f(launcher)
+    # even with nothing hidden, unknown-family topics show too (sanity)
+    assert envelope_filter("", set())(launcher)

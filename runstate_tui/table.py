@@ -154,18 +154,21 @@ def read_log_delta(
     return [e for e in got if filter is None or filter(e)]
 
 
-def envelope_filter(text: str, families: set[str] | None) -> Callable[[Envelope], bool]:
-    """Build a v1 log-filter predicate from the filter-bar text + the enabled topic
-    families. text: a plain substring matched against topic + request_id (+ 'step>N'
-    numeric bound over the body's 'step'). families: if not None, restrict to these
-    topic families. The daemon/upstream #15 will serve this as read(filter=…)."""
+def envelope_filter(text: str, hidden_families: set[str]) -> Callable[[Envelope], bool]:
+    """Build a v1 log-filter predicate from the filter-bar text + the toggled-off
+    (hidden) topic families. text: a plain substring matched against topic +
+    request_id (+ 'step>N' numeric bound over the body's 'step'). hidden_families:
+    topic families to HIDE (the toggled-off KNOWN families) — a topic whose family
+    is NOT in this set always shows, so launcher.* / any unclassified topic is never
+    silently dropped (the log streams every record). The daemon/upstream #15 will
+    serve this as read(filter=…)."""
     text = text.strip()
     stepbound: int | None = None
     if text.startswith("step>") and text[5:].strip().isdigit():
         stepbound = int(text[5:].strip())
 
     def pred(e: Envelope) -> bool:
-        if families is not None and e.topic.split(".")[0] not in families:
+        if e.topic.split(".")[0] in hidden_families:  # subtractive: hide toggled-off known families
             return False
         if stepbound is not None:
             step = e.body.get("step") if isinstance(e.body, dict) else None

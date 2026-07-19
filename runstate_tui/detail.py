@@ -102,7 +102,10 @@ class DrillDownScreen(Screen[None]):
         self._refresh()
 
     def _predicate(self) -> Callable[[Envelope], bool]:
-        return envelope_filter(self._filter_text, self._enabled)
+        # subtractive: hide only the toggled-off KNOWN families (_FAMILIES - _enabled);
+        # a topic in an unknown family (e.g. launcher.*) is never in that hidden set, so
+        # it always shows — the log streams every record (Finding #1).
+        return envelope_filter(self._filter_text, set(_FAMILIES) - self._enabled)
 
     def _show_card(self, card: Text) -> None:
         self.query_one("#detail-card", Static).update(card)

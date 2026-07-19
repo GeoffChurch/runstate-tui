@@ -127,6 +127,42 @@ async def _preserves_selection(tmp_path):
         assert t.cursor_coordinate.row == 0  # seq 3 is now the newest surviving row
 
 
+def test_unknown_family_topics_always_shown_in_render_window(tmp_path):
+    asyncio.run(_unknown_family_always_shown(tmp_path))
+
+
+async def _unknown_family_always_shown(tmp_path):
+    # Finding #1: a topic outside the three known families (e.g. `launcher.terminated`,
+    # written onto the same run channel by runstate's Launcher) must NEVER be silently
+    # dropped, no matter which known families are toggled off -- `_predicate` hides only
+    # the toggled-off KNOWN families (`_FAMILIES - _enabled`), so an unknown family is
+    # never in that hidden set. This goes through `DrillDownScreen._render_window` (not
+    # `envelope_filter` directly) so it discriminates the restrict-to-vs-subtractive bug
+    # in `_predicate` itself.
+    from runstate.channel import Envelope
+
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+
+        launcher = Envelope(seq=6, topic="launcher.terminated", name=None, request_id=None, body={})
+        screen._window.append(launcher)
+        screen._enabled = set()  # toggle OFF every known family
+        screen._render_window()
+
+        # every known-family row is hidden; the unknown-family row is the sole survivor
+        assert t.row_count == 1
+        assert t.get_cell_at(Coordinate(0, 1)).plain == "launcher.terminated"
+
+
 def test_pop_mid_tick_does_not_crash(tmp_path, monkeypatch):
     # Covers detail.py's teardown guard (_TEARDOWN_ERRORS / _marshal's try/except): a
     # pop mid-tick can race _refresh's off-thread _marshal calls onto a torn-down

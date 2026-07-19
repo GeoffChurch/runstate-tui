@@ -99,19 +99,3 @@ def format_envelope(env: Envelope) -> str:
     body = str(env.body)
     line = f"{env.seq:>5}  {env.topic:<20}{rid}  {body}"
     return line.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-
-def format_detail(row: Row) -> str:
-    """The drill-down header: every Row factor + full issues + stops + demand. Pure."""
-    lines = [format_row(row)]  # the one-line summary at the top
-    lines.append(f"episode: {row.episode}" if row.episode else "episode: —")
-    if row.undischarged_stops:
-        lines.append(f"undischarged stops ({len(row.undischarged_stops)}):")
-        lines += [f"  {format_envelope(e)}" for e in row.undischarged_stops]
-    if row.live_demand:
-        lines.append(f"live demand ({len(row.live_demand)}):")
-        lines += [f"  {format_envelope(e)}" for e in row.live_demand]
-    if row.issues:
-        lines.append("issues:")
-        lines += [f"  ⚠ {i.message}" for i in row.issues]
-    return "\n".join(lines)

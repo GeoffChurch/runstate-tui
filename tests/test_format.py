@@ -122,54 +122,6 @@ def test_format_envelope_normal_dict_body_unchanged():
     assert line == "    4  control.stop          webui:x  {'a': 1}"
 
 
-def test_format_detail_shows_all_factors_and_lists():
-    from runstate.channel import Envelope
-
-    from runstate_tui.format import format_detail
-
-    stop = Envelope(seq=5, topic="control.stop", name=None, request_id="webui:s", body={})
-    row = _row(
-        frontier=7,
-        value=("loss", 0.03, 7),
-        elapsed=50.0,
-        episode="local://h/1",
-        undischarged_stops=(stop,),
-    )
-    text = format_detail(row)
-    assert "local://h/1" in text  # episode
-    assert "loss" in text  # value
-    assert "webui:s" in text  # the undischarged stop
-    assert "undischarged stop" in text.lower()
-
-
-def test_format_detail_shows_live_demand_and_issues_no_episode():
-    from runstate.channel import Envelope
-
-    from runstate_tui.format import format_detail
-
-    sub = Envelope(seq=3, topic="control.subscribe", name=None, request_id="webui:sub1", body={})
-    torn = Issue(
-        kind=IssueKind.MALFORMED,
-        severity=Severity.MEDIUM,
-        message="record malformed at seq 4012",
-        seq=4012,
-    )
-    row = _row(live_demand=(sub,), issues=(torn,))
-    text = format_detail(row)
-    assert "episode: —" in text
-    assert "webui:sub1" in text  # the live demand
-    assert "live demand" in text.lower()
-    assert "record malformed at seq 4012" in text
-
-
-def test_format_detail_shows_terminal_error_diagnostic():
-    from runstate_tui.format import format_detail
-
-    row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
-    text = format_detail(row)
-    assert "errored: OOM killed" in text
-
-
 def test_status_color_maps_kinds_and_outcomes():
     from runstate_tui.format import status_color
 
