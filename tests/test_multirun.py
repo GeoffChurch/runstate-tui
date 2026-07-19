@@ -390,6 +390,31 @@ def test_marker_unreadable_row_is_empty_the_dot_carries_it_alone():
     assert marker.plain == ""
 
 
+def test_marker_malformed_row_is_single_warning_colored_amber():
+    # Pins the MEDIUM-severity branch: a single Issue below HIGH but at/above MEDIUM
+    # gets the quieter single ⚠, colored amber -- distinct from the HIGH ⚠⚠ red and
+    # from the no-issue empty/neutral cases pinned above.
+    from runstate_tui.multirun import _marker
+    from runstate_tui.types import Issue, IssueKind, Row, Severity, Status
+
+    row = Row(
+        status=Status.live(),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(),
+        live_demand=(),
+        issues=(
+            Issue(kind=IssueKind.MALFORMED, severity=Severity.MEDIUM, message="record malformed"),
+        ),
+    )
+    marker = _marker(row)
+    assert marker.plain == "⚠"
+    assert marker.style == "#d29922"
+
+
 def test_marker_undischarged_stop_alone_renders_neutral():
     # A stop with no issue: the ■N badge must NOT inherit any severity color -- it is
     # an orthogonal axis, always neutral/default-colored regardless of what precedes it.
