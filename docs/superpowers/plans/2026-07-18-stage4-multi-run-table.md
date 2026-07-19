@@ -2,336 +2,633 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Render many runs as a `DataTable` (one row per run) — the `render = aggregate ∘ map(status_fold) ∘ resolve` functor at `|I|>1`, watermark-gated on a single owner thread, keyed-reconciled into the widget.
+**Goal:** Render many runs as a `DataTable` (one row per run) — the `render = aggregate ∘ map(status_fold) ∘ resolve` functor at `|I|>1`, computed on a single owner thread over an LRU channel pool and keyed-reconciled into the widget.
 
-**Architecture:** `status_fold` factorizes into `fold_log` (log-triggered, cacheable) + `derive_clock` (clock-triggered), with `status_fold = derive_clock ∘ fold_log` so the §11 singleton is preserved by construction. A single owner thread owns an LRU channel pool and, each tick, re-runs `fold_log` only for runs whose `last_seq()` moved (else re-derives the clock factors from the cached snapshot); it builds an immutable `Table` and posts it to the main thread, which reconciles a `DataTable` keyed by `run_id`.
+**Architecture:** A single owner thread owns an LRU pool of open channels keyed by full `RunRef`. Each tick it captures `now` once, folds **every** resolved run with today's unchanged `status_fold` (fresh, under a per-frame frozen-clock `Env`), builds an immutable `Table`, and `post_message`s it to the main thread, which reconciles a `DataTable` keyed by a stable `ref_key`. No fold split, no snapshot cache, no watermark — so the §11 singleton holds by construction (the table row for `r` *is* `render_single(r)`). A main-thread watchdog raises `⚠ I/O stalled` if the owner thread wedges.
 
-**Tech Stack:** Python 3.11, runstate (locked, now public), Textual 8.2.8 (`App`, `DataTable`, `Message`, `@work`), uv, ruff, mypy --strict, pytest, pytest-textual-snapshot.
+**Tech Stack:** Python 3.11, runstate (locked, public), Textual 8.2.8 (`App`, `DataTable`, `Static`, `Message`, `@work`), uv, ruff, mypy --strict, pytest, pytest-textual-snapshot.
 
 ## Global Constraints
 
 Copied from the spec (`docs/superpowers/specs/2026-07-18-stage4-multi-run-table-design.md`).
 
-- **Singleton invariant (§11):** `render_single(r)` must equal the table's row for `r`. The fold split is behavior-preserving: `status_fold(ch, env) == derive_clock(fold_log(ch), env.clock())`. Existing fold tests must stay green unchanged.
-- **Single owner thread owns the pool:** all opens/reads/`fold_log`s/evictions/closes happen on ONE thread (realized as a `@work(thread=True, exclusive=True)` worker touching only `self._pool`); the main thread touches only the `DataTable`. Never assign a reactive from the worker; cross only via `post_message`.
-- **Keyed reconcile, never `clear()`+repopulate:** inside `batch_update()`, `remove_row`/`update_cell`/`add_row(key=run_id)` + `sort()` + `move_cursor`.
-- **Per-frame `now`:** captured once per tick, threaded to every row.
-- **Watermark-gate:** `fold_log` re-runs only when `channel.last_seq() > last_folded_seq`; `derive_clock` runs every tick.
-- **Per-run integrity containment:** a byte-torn/missing/unreadable run is a loud `corrupt`/`missing`/`unreadable` ROW; the table never crashes on one bad run (the per-run `open_and_fold` boundary contains it — post-reshape behavior).
-- **Deferred (do NOT build):** glob resolver (needs `create=False`), cells resolver, issue-flood aggregation, `⚠ I/O stalled`-after-k-ticks. Explicit resolver only.
-- **Gates:** `uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest -q` green before each commit; value types `@dataclass(frozen=True)`; public-API-only; no back-compat shims.
+- **Singleton invariant (§11):** `render_single(r)` must equal the table's row for `r` at a shared `now`. `status_fold`/`fold.py`/`types.py` are UNCHANGED — the table calls the same fold. Existing fold tests stay green unchanged.
+- **Pool + fold-fresh, NOT watermark-gating:** each tick re-folds every resolved run with `status_fold`; the pool caches only open channel *handles*. Do NOT build `fold_log`/`derive_clock`/`LogSnapshot`/`last_seq()` gating (design review rejected it — see spec).
+- **Single owner thread owns the pool:** all opens/reads/folds/evictions/closes happen on ONE thread (a `@work(thread=True, exclusive=True)` worker touching only `self._pool`); the main thread touches only the `DataTable`/banner. Never assign a reactive from the worker; cross only via `post_message`. The real serialization guarantee is "only the self-reschedule chain calls `_tick`" — `exclusive=True` does NOT serialize thread workers (it cancels the asyncio wrapper, not the OS thread).
+- **Full-`RunRef` keying:** the pool keys by the whole `RunRef` tuple and the `DataTable` rows key by `ref_key(ref)` (a stable string), NOT bare `run_id` — `ref_from_path` sets `run_id = Path.stem`, so `a/run1.db` and `b/run1.db` collide on `run_id`. The `run` column *displays* `run_id`.
+- **Keyed reconcile, never `clear()`+repopulate:** inside `self.batch_update()` (an `App` method — `DataTable` has no `batch_update`), `remove_row`/`update_cell`/`add_row(key=ref_key)` + `sort()` + `move_cursor` back onto the selected row. Columns are created with explicit `(label, key)` tuples — an unkeyed `add_columns("run", …)` yields anonymous `ColumnKey(None)` and every later `update_cell`/`sort` fails.
+- **Per-frame `now`:** captured once per tick, threaded to every row via `frame_env = replace(env, clock=lambda: now)` (preserves `objective`/`stuck_threshold`/`liveness`).
+- **Per-run integrity containment:** a byte-torn/missing/unreadable run is a loud `corrupt`/`missing`/`unreadable` ROW; the table never crashes on one bad run. On an integrity failure the pool evicts + closes that channel (fold-fresh re-detects next tick).
+- **`⚠ I/O stalled` (§10, in the MVP):** a main-thread `set_interval` watchdog (independent of the owner thread) shows a banner when the last `TableReady` is older than `k × tick_interval`.
+- **Owner-thread teardown:** `async on_unmount` sets `_closing`, `await self.workers.wait_for_complete()`, then `self._pool.close_all()` on the main thread; `_fold_frame` checks `_closing` at its top and its `call_from_thread` marshals are wrapped in `_TEARDOWN_ERRORS` (reused from `detail.py`).
+- **Deferred (do NOT build):** glob resolver (needs `create=False`; also the live-discovery path), cells resolver, issue-flood aggregation, per-run I/O recovery beyond the banner. Explicit resolver only.
+- **Gates:** `uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest -q` green before each commit; value types `@dataclass(frozen=True)`; public-API-only (no raw sqlite3 in runtime except the exception classes already imported for guards); no back-compat shims.
 
 ## File Structure
 
-- **Modify `runstate_tui/types.py`** — add `LogSnapshot` (frozen).
-- **Modify `runstate_tui/fold.py`** — `fold_log(channel) -> LogSnapshot`, `derive_clock(snap, now) -> Row`, `status_fold = derive_clock ∘ fold_log`.
-- **Modify `runstate_tui/resolver.py`** — `explicit_resolver(refs) -> Resolver`.
-- **Create `runstate_tui/pool.py`** — `ChannelPool` (LRU, owner-thread-only) + `Table` + `fold_frame(pool, refs, env, now) -> Table`.
-- **Create `runstate_tui/multirun.py`** — `MultiRunApp` (owner worker + `TableReady` message + keyed `DataTable` reconcile + `enter`→drill-down).
+- **UNCHANGED:** `runstate_tui/fold.py`, `runstate_tui/types.py` — no split, no `LogSnapshot`.
+- **Modify `runstate_tui/resolver.py`** — add `explicit_resolver(refs) -> Resolver` and `ref_key(ref) -> str`.
+- **Modify `runstate_tui/table.py`** — extract `fold_open_channel(channel, env) -> Row` (the integrity-guarded fold, no close); repoint `open_and_fold` at it (behavior-preserving).
+- **Create `runstate_tui/pool.py`** — `ChannelPool` (LRU, owner-thread-only, `RunRef`-keyed) + `Table` + `fold_frame(pool, refs, env, now) -> Table`.
+- **Create `runstate_tui/multirun.py`** — `MultiRunApp` (owner worker + `TableReady` message + keyed `DataTable` reconcile + `⚠ I/O stalled` watchdog + `enter`→drill-down) + `_cells`/`_marker` helpers.
 - **Modify `runstate_tui/__main__.py`** — route ≥2 run args → `MultiRunApp`, 1 arg → `SingleRunApp`.
-- **Tests:** `tests/test_fold.py` (split + singleton), `tests/test_pool.py` (new), `tests/test_multirun.py` (new), `tests/scenarios/test_table_plane.py` (new).
+- **Tests:** `tests/test_resolver.py`, `tests/test_table.py` (fold_open_channel parity), `tests/test_pool.py` (new), `tests/test_multirun.py` (new), `tests/test_cli.py`, `tests/scenarios/test_table_plane.py` (new).
 
 ---
 
-### Task 1: The fold split — `fold_log` + `derive_clock`
-
-**Files:** Modify `runstate_tui/types.py`, `runstate_tui/fold.py`; Test `tests/test_fold.py`.
-
-**Interfaces:**
-- Produces: `LogSnapshot` (frozen); `fold_log(channel: Channel) -> LogSnapshot`; `derive_clock(snap: LogSnapshot, now: float, stuck_threshold: float) -> Row`; `status_fold(channel, env) -> Row` unchanged externally, now `= derive_clock(fold_log(channel), env.clock(), env.stuck_threshold)`.
-
-- [ ] **Step 1: Write the failing tests**
-
-Add to `tests/test_fold.py`:
-```python
-def test_fold_log_is_now_independent(build_log):
-    from runstate_tui.fold import fold_log
-    ch = build_log([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
-    ])
-    snap = fold_log(ch)
-    assert snap.last_activity == 140.0 and snap.started_t == 100.0 and snap.frontier == 7
-
-
-def test_status_fold_equals_derive_clock_of_fold_log(build_log):
-    from runstate_tui.fold import fold_log, derive_clock
-    ch = build_log([
-        ({"handle": "local://h/1", "t": 100.0}, "lifecycle.started", None),
-        ({"step": 7, "consumed_seq": 0, "t": 140.0}, "lifecycle.heartbeat", None),
-        ({"value": 0.03, "step": 7, "t": 140.0}, "value", "loss"),
-    ])
-    env = _env(150.0, objective="loss")
-    composed = derive_clock(fold_log(ch), 150.0, env.stuck_threshold)
-    assert composed == status_fold(ch, env)  # singleton-preserving composition
-
-
-def test_derive_clock_resolves_live_stale_from_snapshot(build_log):
-    from runstate_tui.fold import fold_log, derive_clock
-    ch = build_log([({"step": 0, "consumed_seq": 0, "t": 100.0}, "lifecycle.heartbeat", None)])
-    snap = fold_log(ch)
-    assert derive_clock(snap, 100.0, 60.0).status.kind is StatusKind.LIVE
-    assert derive_clock(snap, 1000.0, 60.0).status.kind is StatusKind.STALE  # same snap, later now
-```
-(These + the ENTIRE existing `test_fold.py` suite are the spec: `status_fold` behavior must be unchanged.)
-
-- [ ] **Step 2: Run to verify they fail** (`uv run pytest tests/test_fold.py -q` — `fold_log`/`derive_clock` undefined).
-
-- [ ] **Step 3: `types.py` — add `LogSnapshot`**
-```python
-from runstate import RunResult  # add to imports
-
-@dataclass(frozen=True)
-class LogSnapshot:
-    terminal: RunResult | None
-    last_activity: float | None            # freshness anchor (raw; None if absent or non-finite)
-    started_t: float | None                # elapsed anchor (first started.t; None if absent/non-finite)
-    frontier: int | None
-    value: tuple[str, object, int | None] | None
-    episode: str | None
-    undischarged_stops: tuple[Envelope, ...]
-    live_demand: tuple[Envelope, ...]
-    issues: tuple[Issue, ...]              # log-derived issues (malformed, non-finite-la)
-    integrity: Status | None = None       # a whole-run override (unused by fold_log; open_and_fold sets bare rows directly)
-```
-
-- [ ] **Step 4: `fold.py` — split the fold**
-
-Refactor so `fold_log` gathers every log-derived factor + the anchors (no `now`), and `derive_clock` does the `now`-dependent work. `status_fold` becomes the composition. Concretely:
-```python
-def fold_log(channel: Channel) -> LogSnapshot:
-    issues: list[Issue] = []
-    terminal, term_issue = guarded(peek_terminal, channel)
-    if term_issue is not None:
-        issues.append(term_issue)
-    la, la_issue = guarded(last_activity, channel)
-    if la_issue is not None:
-        issues.append(la_issue)
-    if la is not None and not math.isfinite(la):
-        issues.append(Issue(kind=IssueKind.MALFORMED, severity=Severity.HIGH,
-                            message="activity timestamp is not finite (garbage clock)",
-                            detail=f"last_activity={la!r}"))
-        la = None
-    frontier, frontier_issue = guarded(progress, channel)
-    if frontier_issue is not None:
-        issues.append(frontier_issue)
-    value, value_issue = guarded(lambda ch: read_value(ch, None) if False else read_value(ch, _OBJ.get()), channel)
-    # NOTE: value needs env.objective — thread it: fold_log takes `objective: str | None`.
-    ...
-```
-**Adjust the signature:** `fold_log(channel, objective)` needs the objective (a log-read parameter, not clock). Keep `fold_log(channel: Channel, objective: str | None) -> LogSnapshot`; `status_fold` passes `env.objective`. Gather: `terminal`, `la` (freshness anchor, non-finite→None+issue), `frontier`, `value` (via `read_value(ch, objective)` guarded), `episode`+`episode_seq` (the `_episode` guarded read from Stage 3, used to episode-scope stops), `undischarged_stops` (filtered `seq > episode_seq`), `live_demand`, `started_t` (the first-`started.t` via a guarded read, non-finite→None), and `issues`. Return the `LogSnapshot`.
-
-```python
-def derive_clock(snap: LogSnapshot, now: float, stuck_threshold: float) -> Row:
-    issues = list(snap.issues)
-    # elapsed
-    if snap.started_t is None:
-        elapsed = None
-    elif snap.started_t > now:
-        elapsed = 0.0
-        issues.append(Issue(kind=IssueKind.SKEW_SUSPECTED, severity=Severity.MEDIUM,
-                            message="run epoch is in the future (clock skew)",
-                            detail=f"started.t={snap.started_t} > now={now}"))
-    else:
-        elapsed = now - snap.started_t
-    # freshness + status
-    la = snap.last_activity
-    freshness = None if la is None else max(0.0, now - la)
-    if la is not None and la > now:
-        issues.append(Issue(kind=IssueKind.SKEW_SUSPECTED, severity=Severity.MEDIUM,
-                            message="last activity is in the future (clock skew)"))
-    if snap.terminal is not None:
-        status = Status.terminal(snap.terminal.outcome, detail=snap.terminal.error)
-    elif la is None:
-        status = Status.pending()
-    else:
-        status = Status.live() if freshness <= stuck_threshold else Status.stale()
-    return Row(status=status, frontier=snap.frontier, freshness=freshness, value=snap.value,
-               elapsed=elapsed, episode=snap.episode, undischarged_stops=snap.undischarged_stops,
-               live_demand=snap.live_demand, issues=tuple(issues))
-
-
-def status_fold(channel: Channel, env: Env) -> Row:
-    return derive_clock(fold_log(channel, env.objective), env.clock(), env.stuck_threshold)
-```
-Preserve every current behavior (freshness clamp, both skew issues, non-finite guards, episode-scope, `Status.detail`). Delete the old inline `reconcile_status`/`read_elapsed`/`status_fold` bodies (or keep `reconcile_status`/`read_elapsed` as thin helpers used by `fold_log`/`derive_clock` if cleaner — implementer's call, but the split must be real and `status_fold` must be the composition). Use `env.stuck_threshold` (confirm it exists on `Env`).
-
-- [ ] **Step 5: Run tests → all `test_fold.py` green** (existing + new). **Step 6: full gates; commit** `refactor(fold): split status_fold into fold_log + derive_clock`.
-
----
-
-### Task 2: `explicit_resolver`
+### Task 1: `explicit_resolver` + `ref_key`
 
 **Files:** Modify `runstate_tui/resolver.py`; Test `tests/test_resolver.py`.
 
-- [ ] **Step 1: Failing test**
+**Interfaces:**
+- Produces: `explicit_resolver(refs: list[RunRef]) -> Resolver` (a fixed, order-preserving, de-duplicated IndexSet); `ref_key(ref: RunRef) -> str` (a stable, collision-proof string key for the `DataTable` row and reverse lookup).
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/test_resolver.py`:
 ```python
 def test_explicit_resolver_returns_the_fixed_list_regardless_of_now():
     from runstate_tui.resolver import explicit_resolver
     refs = [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
     resolve = explicit_resolver(refs)
     assert resolve(0.0) == refs and resolve(9999.0) == refs
+
+
+def test_explicit_resolver_dedupes_exact_duplicates_preserving_order():
+    from runstate_tui.resolver import explicit_resolver
+    refs = [("a", "/root", "sqlite"), ("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
+    assert explicit_resolver(refs)(0.0) == [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
+
+
+def test_ref_key_distinguishes_same_basename_across_roots():
+    from runstate_tui.resolver import ref_key
+    a = ("run1", "/a", "sqlite")
+    b = ("run1", "/b", "sqlite")   # same run_id (Path.stem), different root
+    assert ref_key(a) != ref_key(b)
+    assert ref_key(a) == ref_key(("run1", "/a", "sqlite"))   # stable
 ```
-- [ ] **Step 2: fail. Step 3:**
+
+- [ ] **Step 2: Run to verify they fail** — `uv run pytest tests/test_resolver.py -q` (names undefined).
+
+- [ ] **Step 3: Implement in `runstate_tui/resolver.py`**
 ```python
 def explicit_resolver(refs: list[RunRef]) -> Resolver:
-    """A fixed IndexSet — the safe (no create=False) multi-run resolver."""
-    snapshot = list(refs)
+    """A fixed IndexSet — the safe (no create=False) multi-run resolver. Exact
+    duplicate refs are dropped (order preserved) so each run is one pooled channel
+    and one DataTable row."""
+    snapshot = list(dict.fromkeys(refs))
+
     def resolve(_now: float) -> list[RunRef]:
         return list(snapshot)
+
     return resolve
+
+
+def ref_key(ref: RunRef) -> str:
+    """A stable, collision-proof string key for a RunRef (run_id alone collides:
+    a/run1.db and b/run1.db both have run_id 'run1'). NUL can't appear in a path,
+    so it is a safe join separator."""
+    return "\x00".join(ref)
 ```
-- [ ] **Step 4: pass; gates; commit** `feat(resolver): explicit_resolver (fixed IndexSet)`.
+
+- [ ] **Step 4: Run tests → pass. Step 5: full gates; commit** `feat(resolver): explicit_resolver + ref_key (full-RunRef keying)`.
 
 ---
 
-### Task 3: The LRU pool + watermark-gated `fold_frame` → `Table`
+### Task 2: `fold_open_channel` extraction + the LRU `ChannelPool` + `fold_frame`
 
-**Files:** Create `runstate_tui/pool.py`; Test `tests/test_pool.py`.
+**Files:** Modify `runstate_tui/table.py`; Create `runstate_tui/pool.py`; Test `tests/test_table.py`, `tests/test_pool.py`.
 
 **Interfaces:**
-- Consumes: `fold_log`/`derive_clock` (Task 1), `open_and_fold`/`_bare`/`_corrupt` guards (table.py), `RunRef`, `Env`, `Row`.
-- Produces: `Table = tuple[tuple[str, Row], ...]` (ordered `(run_id, Row)`); `ChannelPool(cap=128)` with `.close_all()`; `fold_frame(pool, refs, env, now) -> Table`.
+- Consumes: `status_fold` (fold.py, unchanged), `_bare`/`_corrupt`/`_OPEN_ERRORS`/`locate_torn_seq` (table.py), `RunRef`/`ref_key` (resolver.py), `Env`, `Row`/`Status`/`StatusKind`.
+- Produces: `fold_open_channel(channel: Channel, env: Env) -> Row` (table.py); `Table = tuple[tuple[RunRef, Row], ...]`; `ChannelPool(cap: int = 128)` with `__len__`, `reconcile(live)`, `row_for(ref, frame_env)`, `close_all()`; `fold_frame(pool, refs, env, now) -> Table` (pool.py).
 
-- [ ] **Step 1: Failing tests**
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/test_table.py` (parity — the extraction must not change behavior):
 ```python
-def test_fold_frame_watermark_gates_idle_runs(tmp_path, monkeypatch):
-    # an idle run's fold_log is NOT re-run across ticks; a grown run IS.
+def test_fold_open_channel_matches_status_fold_on_a_healthy_run(build_log):
+    from runstate_tui.table import fold_open_channel
+    ch = build_log([({"handle": "h", "t": 100.0}, "lifecycle.started", None)])
+    env = _env(150.0)  # the module's Env helper
+    assert fold_open_channel(ch, env) == status_fold(ch, env)
+
+
+def test_fold_open_channel_maps_byte_torn_to_corrupt(corrupt_seq, tmp_path):
     from runstate import open_channel
-    from runstate_tui.pool import ChannelPool, fold_frame
-    import runstate_tui.pool as poolmod
+    from runstate_tui.table import fold_open_channel
     ch = open_channel("r", root=tmp_path, backend="sqlite")
-    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
+    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started"); ch.close()
+    corrupt_seq(tmp_path, "r", 1, literal="{not json")
+    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    assert fold_open_channel(ch, _env(150.0)).status.kind is StatusKind.CORRUPT
     ch.close()
-    ref = ("r", str(tmp_path), "sqlite")
-    calls = {"n": 0}
-    real = poolmod.fold_log
-    monkeypatch.setattr(poolmod, "fold_log", lambda c, o: (calls.__setitem__("n", calls["n"] + 1), real(c, o))[1])
-    pool = ChannelPool(cap=8)
+```
+
+Create `tests/test_pool.py`:
+```python
+import pytest
+from runstate import open_channel
+from runstate_tui.env import Env
+from runstate_tui.pool import ChannelPool, fold_frame
+from runstate_tui.table import render_single
+from runstate_tui.types import StatusKind
+
+
+def _seed(tmp_path, run_id, t=100.0):
+    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
+    ch.close()
+    return (run_id, str(tmp_path), "sqlite")
+
+
+def test_fold_frame_row_equals_render_single(tmp_path):
+    ref = _seed(tmp_path, "r")
     env = Env(clock=lambda: 150.0)
-    fold_frame(pool, [ref], env, 150.0); n1 = calls["n"]
-    fold_frame(pool, [ref], env, 151.0); assert calls["n"] == n1   # idle -> not re-folded
-    w = open_channel("r", root=tmp_path, backend="sqlite"); w.send({"step": 1, "consumed_seq": 0, "t": 152.0}, topic="lifecycle.heartbeat"); w.close()
-    fold_frame(pool, [ref], env, 153.0); assert calls["n"] == n1 + 1  # grew -> re-folded
+    pool = ChannelPool(cap=8)
+    table = fold_frame(pool, [ref], env, 150.0)
+    assert dict(table)[ref] == render_single(ref, env)   # the §11 singleton, through the pool
     pool.close_all()
 
 
-def test_fold_frame_one_corrupt_run_does_not_sink_the_others(tmp_path):
-    from runstate import open_channel
-    from runstate_tui.pool import ChannelPool, fold_frame
-    from runstate_tui.helpers import corrupt_seq  # or inline the raw UPDATE
-    good = open_channel("good", root=tmp_path, backend="sqlite"); good.send({"handle":"h","t":100.0}, topic="lifecycle.started"); good.close()
-    bad = open_channel("bad", root=tmp_path, backend="sqlite"); bad.send({"handle":"h","t":100.0}, topic="lifecycle.started"); bad.close()
-    corrupt_seq(tmp_path, "bad", 1, literal="{not json")
+def test_fold_frame_distinguishes_same_basename_across_roots(tmp_path):
+    import os
+    a_dir = tmp_path / "a"; b_dir = tmp_path / "b"; os.mkdir(a_dir); os.mkdir(b_dir)
+    ra = _seed(a_dir, "run1", t=100.0)
+    rb = _seed(b_dir, "run1", t=200.0)
     pool = ChannelPool(cap=8)
-    table = fold_frame(pool, [("good", str(tmp_path), "sqlite"), ("bad", str(tmp_path), "sqlite")], Env(clock=lambda: 150.0), 150.0)
-    rows = dict(table)
-    assert rows["good"].status.kind is not StatusKind.CORRUPT
-    assert rows["bad"].status.kind is StatusKind.CORRUPT   # contained, table survived
+    table = fold_frame(pool, [ra, rb], Env(clock=lambda: 300.0), 300.0)
+    assert len(table) == 2 and len(pool) == 2          # two distinct runs, two channels
+    assert dict(table)[ra].elapsed == 200.0 and dict(table)[rb].elapsed == 100.0
+    pool.close_all()
+
+
+def test_fold_frame_one_corrupt_run_does_not_sink_the_others(tmp_path, corrupt_seq):
+    good = _seed(tmp_path, "good")
+    _seed(tmp_path, "bad")
+    corrupt_seq(tmp_path, "bad", 1, literal="{not json")
+    bad = ("bad", str(tmp_path), "sqlite")
+    pool = ChannelPool(cap=8)
+    table = dict(fold_frame(pool, [good, bad], Env(clock=lambda: 150.0), 150.0))
+    assert table[good].status.kind is not StatusKind.CORRUPT
+    assert table[bad].status.kind is StatusKind.CORRUPT     # contained
+    assert bad not in [r for r in pool._open]               # bad handle evicted; re-detected next tick
     pool.close_all()
 
 
 def test_pool_lru_evicts_beyond_cap(tmp_path):
-    # cap=2, resolve 3 runs -> at most 2 channels open; the LRU one is closed.
-    ... (build 3 sqlite runs; ChannelPool(cap=2); fold_frame over all 3; assert pool holds <= 2 open channels)
+    refs = [_seed(tmp_path, f"r{i}") for i in range(3)]
+    env = Env(clock=lambda: 150.0)
+    pool = ChannelPool(cap=2)
+    fold_frame(pool, refs, env, 150.0)
+    assert len(pool) <= 2                                   # LRU kept the pool bounded
+    pool.close_all()
+
+
+def test_reconcile_closes_runs_that_left_the_resolver(tmp_path):
+    a = _seed(tmp_path, "a"); b = _seed(tmp_path, "b")
+    env = Env(clock=lambda: 150.0)
+    pool = ChannelPool(cap=8)
+    fold_frame(pool, [a, b], env, 150.0); assert len(pool) == 2
+    fold_frame(pool, [a], env, 151.0); assert len(pool) == 1   # b dropped + closed
+    pool.close_all()
 ```
-- [ ] **Step 2: fail. Step 3: implement `pool.py`.**
 
-`ChannelPool`: an `OrderedDict[run_id -> (channel, last_folded_seq, LogSnapshot)]` (owner-thread-only). Methods: `snapshot_for(ref, env, now) -> Row` that (a) stat-before-open + open via the pooled channel (open on miss; LRU-evict+close the oldest beyond `cap`), (b) `if channel.last_seq() > last_folded_seq: snap = fold_log(channel, env.objective)` else reuse cached snap, (c) `derive_clock(snap, now, env.stuck_threshold)`. Integrity (missing/unreadable/corrupt) → a bare `Row` via the same guards `open_and_fold` uses (reuse `_bare`/`_corrupt`; a byte-torn in `fold_log` is caught here → `_corrupt(locate_torn_seq(channel))`, NOT propagated). `close_all()` closes every channel.
+- [ ] **Step 2: Run to verify they fail** — `uv run pytest tests/test_pool.py tests/test_table.py -q`.
 
-`fold_frame(pool, refs, env, now) -> Table`: `pool.reconcile(set(run_ids))` (evict/close runs no longer resolved); then `tuple((r[0], pool.snapshot_for(r, env, now)) for r in refs)`. Capture `now` is the caller's (per-frame).
+- [ ] **Step 3: Extract `fold_open_channel` in `table.py`**
 
-- [ ] **Step 4: pass (incl. the gating counter, corrupt containment, LRU). Step 5: gates; commit** `feat(pool): LRU channel pool + watermark-gated fold_frame`.
+Add (import `Channel`: change `from runstate.channel import Envelope` to `from runstate.channel import Channel, Envelope`):
+```python
+def fold_open_channel(channel: Channel, env: Env) -> Row:
+    """Fold an ALREADY-OPEN channel with the integrity guards, WITHOUT closing it.
+    A byte-torn (json.JSONDecodeError) -> loud `corrupt` carrying the located seq; a
+    substrate fault mid-read -> `unreadable`. open_and_fold closes in its own finally;
+    the pool keeps the handle and re-uses it next tick (folding fresh)."""
+    try:
+        return status_fold(channel, env)
+    except json.JSONDecodeError:
+        return _corrupt(locate_torn_seq(channel))
+    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
+        return _bare(Status.unreadable())
+```
+Repoint `open_and_fold`'s fold body at it (leave the stat + open + `finally: channel.close()` exactly as-is):
+```python
+    try:
+        return fold_open_channel(channel, env)
+    finally:
+        channel.close()
+```
+(Delete the now-duplicated `except json.JSONDecodeError` / `except (sqlite3.DatabaseError, …)` block from `open_and_fold` — `fold_open_channel` owns it.) The whole existing `tests/test_table.py` suite must stay green (pure refactor).
+
+- [ ] **Step 4: Implement `runstate_tui/pool.py`**
+```python
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import replace
+from pathlib import Path
+
+from runstate import open_channel
+from runstate.channel import Channel
+
+from .env import Env
+from .resolver import RunRef
+from .table import _OPEN_ERRORS, _bare, fold_open_channel
+from .types import Row, Status, StatusKind
+
+Table = tuple[tuple[RunRef, Row], ...]
+
+# integrity verdicts that mean the pooled handle is no good — evict + close so the
+# next tick cold-opens fresh (self-healing detection; the pool holds only healthy handles).
+_EVICT_KINDS = (StatusKind.CORRUPT, StatusKind.UNREADABLE)
+
+
+class ChannelPool:
+    """Owner-thread-ONLY LRU pool of open channels, keyed by the full RunRef.
+    reader == evictor: a mid-fold channel is never closed under it. NOT thread-safe
+    by design — one owner thread touches it (opens, reads, evicts, closes)."""
+
+    def __init__(self, cap: int = 128) -> None:
+        self._cap = cap
+        self._open: OrderedDict[RunRef, Channel] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._open)
+
+    def _evict(self, ref: RunRef) -> None:
+        ch = self._open.pop(ref, None)
+        if ch is not None:
+            ch.close()
+
+    def _evict_oldest(self) -> None:
+        _ref, ch = self._open.popitem(last=False)
+        ch.close()
+
+    def reconcile(self, live: set[RunRef]) -> None:
+        """Close + drop any pooled run no longer resolved this frame."""
+        for ref in [r for r in self._open if r not in live]:
+            self._evict(ref)
+
+    def row_for(self, ref: RunRef, frame_env: Env) -> Row:
+        run_id, root, backend = ref
+        # stat-before-open EVERY tick (never fabricate a phantom db; catch a run whose
+        # file vanished mid-session -> honest `missing`, matching open_and_fold).
+        if backend == "sqlite":
+            try:
+                (Path(root) / f"{run_id}.db").stat()
+            except FileNotFoundError:
+                self._evict(ref)
+                return _bare(Status.missing())
+            except OSError:
+                self._evict(ref)
+                return _bare(Status.unreadable())
+        ch = self._open.get(ref)
+        if ch is None:
+            try:
+                ch = open_channel(run_id, root=root, backend=backend)
+            except _OPEN_ERRORS:
+                return _bare(Status.unreadable())   # not cached — retried next tick
+            if len(self._open) >= self._cap:
+                self._evict_oldest()
+            self._open[ref] = ch
+        self._open.move_to_end(ref)                 # LRU: most-recently-used last
+        row = fold_open_channel(ch, frame_env)
+        if row.status.kind in _EVICT_KINDS:
+            self._evict(ref)
+        return row
+
+    def close_all(self) -> None:
+        for ch in self._open.values():
+            ch.close()
+        self._open.clear()
+
+
+def fold_frame(pool: ChannelPool, refs: list[RunRef], env: Env, now: float) -> Table:
+    """One owner-thread frame. Reconcile the pool to `refs`, then fold EVERY run fresh
+    under a single per-frame `now` (via a frozen-clock Env so objective/threshold/
+    liveness carry through). The row for `r` == render_single(r) at this `now`."""
+    frame_env = replace(env, clock=lambda: now)
+    pool.reconcile(set(refs))
+    return tuple((ref, pool.row_for(ref, frame_env)) for ref in refs)
+```
+
+- [ ] **Step 5: Run tests → pass** (`uv run pytest tests/test_pool.py tests/test_table.py -q`). **Step 6: full gates; commit** `feat(pool): LRU RunRef-keyed channel pool + fold_frame (fold-fresh)`.
 
 ---
 
-### Task 4: `MultiRunApp` — owner worker + keyed `DataTable` reconcile
+### Task 3: `MultiRunApp` — owner worker + keyed reconcile + `⚠ I/O stalled` watchdog
 
-**Files:** Create `runstate_tui/multirun.py`; Test `tests/test_multirun.py`.
+**Files:** Create `runstate_tui/multirun.py`; Test `tests/test_multirun.py`, `tests/scenarios/test_table_plane.py`.
 
 **Interfaces:**
-- Consumes: `fold_frame`/`ChannelPool`/`Table` (Task 3), `Resolver` (Task 2), `Env`, `format_row`'s field logic (for cells).
-- Produces: `MultiRunApp(App[None])` — `__init__(self, resolver, env, tick_interval=1.0, pool_cap=128)`.
+- Consumes: `fold_frame`/`ChannelPool`/`Table` (Task 2), `explicit_resolver`/`ref_key`/`RunRef` (Task 1), `Env`, `Row`/`Severity`, `_TEARDOWN_ERRORS` (detail.py).
+- Produces: `MultiRunApp(App[None])` — `__init__(self, resolver, env, *, tick_interval=1.0, pool_cap=128, stall_ticks=3)`; `TableReady(Message)`.
 
-- [ ] **Step 1: Failing tests** (via `run_test`): the table shows N runs (one row per run_id); appending activity to a run updates its row (cursor preserved); a resolver whose set shrinks removes the row. Assert cell content via the `DataTable` API and `run_id` row keys. Snapshot the layout (`snap_compare`). (Use `held_writer_sqlite_run` / seeded sqlite runs + `advance_tick`-style manual ticks; build the app at `tick_interval=999` and drive `_tick` manually.)
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 2: fail. Step 3: implement `multirun.py`.**
+Follow the async `run_test()` harness already used in `tests/test_app.py` (build the app at a large `tick_interval` so it doesn't self-tick during the test; `await pilot.pause()` twice to let the mount tick's worker run and its `TableReady` reconcile). Create `tests/test_multirun.py`:
 ```python
+import pytest
+from runstate import open_channel
+from runstate_tui.env import Env
+from runstate_tui.multirun import MultiRunApp
+from runstate_tui.resolver import explicit_resolver, ref_key
+from textual.widgets import DataTable, Static
+
+
+def _seed(tmp_path, run_id, t=100.0):
+    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": t}, topic="lifecycle.started"); ch.close()
+    return (run_id, str(tmp_path), "sqlite")
+
+
+@pytest.mark.asyncio
+async def test_table_shows_one_keyed_row_per_run(tmp_path):
+    refs = [_seed(tmp_path, "a"), _seed(tmp_path, "b")]
+    app = MultiRunApp(explicit_resolver(refs), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause(); await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert {k.value for k in t.rows.keys()} == {ref_key(r) for r in refs}
+
+
+@pytest.mark.asyncio
+async def test_row_updates_and_preserves_cursor(tmp_path):
+    ref = _seed(tmp_path, "a")
+    app = MultiRunApp(explicit_resolver([ref]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause(); await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        before = t.cursor_coordinate
+        w = open_channel("a", root=ref[1], backend="sqlite")
+        w.send({"step": 5, "consumed_seq": 0, "t": 150.0}, topic="lifecycle.heartbeat"); w.close()
+        app._tick()
+        await pilot.pause(); await pilot.pause()
+        assert t.cursor_coordinate == before                    # keyed reconcile, cursor kept
+        assert t.get_row_index(ref_key(ref)) == 0               # still present, re-sorted
+
+
+@pytest.mark.asyncio
+async def test_shrinking_resolver_removes_the_row(tmp_path):
+    a = _seed(tmp_path, "a"); b = _seed(tmp_path, "b")
+    live = {"refs": [a, b]}
+    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause(); await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.row_count == 2
+        live["refs"] = [a]
+        app._tick(); await pilot.pause(); await pilot.pause()
+        assert {k.value for k in t.rows.keys()} == {ref_key(a)}
+
+
+def test_io_stalled_watchdog_raises_and_clears():
+    # Unit-test the watchdog directly (no threads): a stale last_ready under the fake
+    # clock raises the banner; a fresh ready clears it.
+    from runstate_tui.multirun import MultiRunApp
+    clock = {"t": 100.0}
+    app = MultiRunApp(explicit_resolver([]), Env(clock=lambda: clock["t"]),
+                      tick_interval=1.0, stall_ticks=3)
+    banner = Static("", id="stall")
+    app._last_ready = 100.0
+    clock["t"] = 104.0                                  # 4s > 3 * 1s
+    assert app._is_stalled()                            # banner condition true
+    app._last_ready = 104.0
+    assert not app._is_stalled()                        # a fresh ready cleared it
+```
+Add a `snap_compare` layout test in `tests/scenarios/test_table_plane.py` (two seeded runs, assert the rendered table snapshot) following the existing snapshot-test convention.
+
+- [ ] **Step 2: Run to verify they fail** — `uv run pytest tests/test_multirun.py -q`.
+
+- [ ] **Step 3: Implement `runstate_tui/multirun.py`**
+```python
+from __future__ import annotations
+
+from textual.app import App, ComposeResult
+from textual.message import Message
+from textual.widgets import DataTable, Static
+from textual.worker import work
+
+from .detail import DrillDownScreen, _TEARDOWN_ERRORS
+from .env import Env
+from .pool import ChannelPool, Table, fold_frame
+from .resolver import Resolver, RunRef, ref_key
+from .types import Row, Severity
+
+_COLUMNS = ("run", "status", "step", "age", "value", "elapsed", "!")
+
+
+def _marker(row: Row) -> str:
+    """A compact per-row severity glyph (keeps the table below the ISA-18.2 flood line).
+    row.severity already folds status + issues (CORRUPT/UNREADABLE -> HIGH)."""
+    stops = f"⏹{len(row.undischarged_stops)}" if row.undischarged_stops else ""
+    if row.severity >= Severity.HIGH:
+        return f"⚠⚠{stops}"
+    if row.severity >= Severity.MEDIUM:
+        return f"⚠{stops}"
+    return stops
+
+
+def _cells(ref: RunRef, row: Row) -> tuple[str, str, str, str, str, str, str]:
+    """The 7 column cells — same field semantics as format_row, one field per column."""
+    run_id = ref[0]
+    status = row.status.label + (f": {row.status.detail}" if row.status.detail else "")
+    step = "" if row.frontier is None else str(row.frontier)
+    age = "" if row.freshness is None else f"{row.freshness:.0f}s"
+    if row.value is None:
+        value = ""
+    else:
+        name, val, vstep = row.value
+        value = f"{name}={val}" + (f"@{vstep}" if vstep is not None else "")
+    elapsed = "" if row.elapsed is None else f"{row.elapsed:.0f}s"
+    return (run_id, status, step, age, value, elapsed, _marker(row))
+
+
 class TableReady(Message):
     def __init__(self, table: Table) -> None:
         self.table = table
         super().__init__()
 
+
 class MultiRunApp(App[None]):
+    CSS = "#stall { color: $warning; height: auto; }"
     BINDINGS = [("enter", "detail", "Detail")]
-    def __init__(self, resolver, env, tick_interval=1.0, pool_cap=128):
-        super().__init__(); self._resolver = resolver; self._env = env
-        self._tick_interval = tick_interval; self._pool = ChannelPool(cap=pool_cap)
-    def compose(self): yield DataTable(id="runs")
-    def on_mount(self):
+
+    def __init__(self, resolver: Resolver, env: Env, *, tick_interval: float = 1.0,
+                 pool_cap: int = 128, stall_ticks: int = 3) -> None:
+        super().__init__()
+        self._resolver = resolver
+        self._env = env
+        self._tick_interval = tick_interval
+        self._pool = ChannelPool(cap=pool_cap)
+        self._stall_after = stall_ticks * tick_interval
+        self._last_ready: float | None = None
+        self._closing = False
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="stall")     # the watchdog banner (empty text == hidden)
+        yield DataTable(id="runs")
+
+    def on_mount(self) -> None:
         t = self.query_one("#runs", DataTable)
-        t.add_columns("run", "status", "step", "age", "value", "elapsed", "!")
-        t.cursor_type = "row"; self._tick()
-    def _tick(self): self._fold_frame()
+        t.add_columns(*[(c, c) for c in _COLUMNS])   # explicit (label, key); anonymous keys break update_cell/sort
+        t.cursor_type = "row"
+        self.set_interval(self._tick_interval, self._on_watchdog)   # MAIN-thread, independent of the owner thread
+        self._tick()
+
+    def _tick(self) -> None:
+        # ONLY on_mount and _fold_frame's own tail may call this. That self-reschedule
+        # chain is the real serialization — exclusive=True does NOT serialize thread workers.
+        if not self._closing:
+            self._fold_frame()
+
     @work(thread=True, exclusive=True)
-    def _fold_frame(self):                      # the single owner thread
+    def _fold_frame(self) -> None:                     # the single owner thread — owns the whole pool
+        if self._closing:
+            return
         now = self._env.clock()
         table = fold_frame(self._pool, self._resolver(now), self._env, now)
-        self.call_from_thread(self.post_message, TableReady(table))
-        self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
-    def on_table_ready(self, msg: TableReady):  # main thread: keyed reconcile
-        t = self.query_one("#runs", DataTable)
-        want = {rid for rid, _ in msg.table}
-        with t.batch_update():
-            for key in [k.value for k in list(t.rows.keys())]:
-                if key not in want: t.remove_row(key)
-            for rid, row in msg.table:
-                cells = _cells(rid, row)
-                if rid in t.rows: 
-                    for col, val in zip(_COLS, cells): t.update_cell(rid, col, val)
-                else: t.add_row(*cells, key=rid)
-            t.sort("run")
-    def on_unmount(self): self._pool.close_all()
-```
-Provide `_cells(rid, row)` (mirror `format_row`'s fields: run_id, status label, step, age, value, elapsed, an issue marker like `⚠{maxsev}` or "") and `_COLS` (the column keys). Verify the exact `DataTable` API for row-key iteration / `update_cell(row_key, column_key, value)` / `rows.keys()` against Textual 8.2.8 (adapt if the accessor differs). `format_row`'s field-formatting helpers should be reused, not reinvented — extract them from `format.py` if needed.
+        try:
+            self.post_message(TableReady(table))                    # post_message is thread-safe on its own
+            self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
+        except _TEARDOWN_ERRORS:
+            pass                                       # a quit landed mid-frame; drop the marshal
 
-- [ ] **Step 4: pass (3× for the threaded ticks). Step 5: gates; commit** `feat(multirun): MultiRunApp — owner-thread pool + keyed DataTable reconcile`.
+    def on_table_ready(self, msg: TableReady) -> None:  # MAIN thread: keyed reconcile
+        self._last_ready = self._env.clock()
+        t = self.query_one("#runs", DataTable)
+        want = {ref_key(ref) for ref, _ in msg.table}
+        sel = None
+        if t.row_count:
+            sel = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
+        with self.batch_update():                       # App.batch_update — DataTable has none
+            present = {k.value for k in list(t.rows.keys())}
+            for key in present:
+                if key not in want:
+                    t.remove_row(key)
+            present &= want
+            for ref, row in msg.table:
+                key = ref_key(ref)
+                cells = _cells(ref, row)
+                if key in present:
+                    for col, val in zip(_COLUMNS, cells):
+                        t.update_cell(key, col, val)
+                else:
+                    t.add_row(*cells, key=key)
+            t.sort("run")
+            if sel is not None and sel in want:
+                t.move_cursor(row=t.get_row_index(sel))  # sort() doesn't track the key; restore selection
+
+    def _is_stalled(self) -> bool:
+        return self._last_ready is not None and self._env.clock() - self._last_ready > self._stall_after
+
+    def _on_watchdog(self) -> None:
+        self.query_one("#stall", Static).update("⚠ I/O stalled" if self._is_stalled() else "")
+
+    def action_detail(self) -> None:
+        t = self.query_one("#runs", DataTable)
+        if t.row_count == 0:
+            return
+        key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
+        by_key = {ref_key(r): r for r in self._resolver(self._env.clock())}   # reconstruct, no worker mutation
+        ref = by_key.get(key)
+        if ref is not None:
+            self.push_screen(DrillDownScreen(ref, self._env, self._tick_interval))
+
+    async def on_unmount(self) -> None:
+        self._closing = True
+        await self.workers.wait_for_complete()          # drain the in-flight fold (cancel can't stop the OS thread)
+        self._pool.close_all()                          # now safe: owner thread idle
+```
+Notes for the implementer: (a) `action_detail`/`DrillDownScreen` wiring is exercised in Task 4 — it is present here so the binding resolves; keep it. (b) If `self.workers.wait_for_complete()` is not awaitable in Textual 8.2.8, confirm the correct drain call against the installed `textual/worker_manager.py` and use it — the requirement is "no main-thread pool touch until the owner thread is idle." (c) Confirm `Static.update("")` hides the banner (empty renderable) in 8.2.8; if it leaves a blank line, toggle `display` instead.
+
+- [ ] **Step 4: Run tests → pass** (the async tests may need `await pilot.pause()` counts adjusted for the threaded worker + message round-trip — match `tests/test_app.py`). **Step 5: full gates; commit** `feat(multirun): MultiRunApp — owner-thread pool, keyed reconcile, I/O-stalled watchdog`.
 
 ---
 
-### Task 5: `enter` → drill-down for the selected run
+### Task 4: `enter` → drill-down for the selected run
 
 **Files:** Modify `runstate_tui/multirun.py`; Test `tests/test_multirun.py`.
 
-- [ ] **Step 1: Failing test** — `enter` on the selected row pushes a `DrillDownScreen` for that run's ref; `escape` returns. (Map the cursor's `run_id` back to its `RunRef` — keep a `{run_id: RunRef}` map updated each frame, or reconstruct from the resolver.)
-- [ ] **Step 2: fail. Step 3:**
+(The `action_detail` code shipped in Task 3; this task pins its behavior with a test and verifies the escape-return path.)
+
+- [ ] **Step 1: Write the failing test**
 ```python
-    def action_detail(self):
-        t = self.query_one("#runs", DataTable)
-        if t.row_count == 0: return
-        run_id = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
-        ref = self._ref_by_id.get(run_id)
-        if ref is not None:
-            self.push_screen(DrillDownScreen(ref, self._env, self._tick_interval))
+@pytest.mark.asyncio
+async def test_enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
+    from runstate_tui.detail import DrillDownScreen
+    a = _seed(tmp_path, "a"); b = _seed(tmp_path, "b")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause(); await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DrillDownScreen)
+        assert app.screen._ref in (a, b)            # the SELECTED run's ref (adapt attr name to DrillDownScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, DrillDownScreen)
 ```
-Maintain `self._ref_by_id` (updated in `_fold_frame` or from the resolver). Import `DrillDownScreen`.
-- [ ] **Step 4: pass (3×). Step 5: gates; commit** `feat(multirun): enter opens the drill-down for the selected run`.
+Adapt `app.screen._ref` to `DrillDownScreen`'s actual ref attribute (read `detail.py`).
+
+- [ ] **Step 2: Run to verify it fails/passes; adjust `action_detail` only if the test reveals a gap** (e.g. the cursor-key→ref mapping). **Step 3:** no new code expected beyond Task 3's `action_detail`; if the ref attribute differs, fix the assertion or the lookup.
+
+- [ ] **Step 4: pass. Step 5: gates; commit** `test(multirun): enter opens the drill-down for the selected run`.
 
 ---
 
-### Task 6: CLI wiring
+### Task 5: CLI wiring
 
 **Files:** Modify `runstate_tui/__main__.py`; Test `tests/test_cli.py`.
 
-- [ ] **Step 1: Failing test** — `main(["a.db", "b.db"])` constructs a `MultiRunApp` (monkeypatch its `.run`); `main(["a.db"])` still constructs `SingleRunApp`; `main([])` → usage → 2.
-- [ ] **Step 2: fail. Step 3:** in `main`, `if len(runs) >= 2: MultiRunApp(explicit_resolver([ref_from_path(p) for p in runs]), Env(clock=time.time)).run()` else the existing single-run path. Update usage text to accept multiple paths.
-- [ ] **Step 4: pass; gates; commit** `feat(cli): multiple run paths -> MultiRunApp`.
+- [ ] **Step 1: Write the failing tests**
+```python
+def test_two_paths_construct_multirun(monkeypatch, tmp_path):
+    import runstate_tui.__main__ as m
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    m.main([str(tmp_path / "a.db"), str(tmp_path / "b.db")])
+    assert "multi" in made
+
+
+def test_one_path_still_constructs_single(monkeypatch, tmp_path):
+    import runstate_tui.__main__ as m
+    made = {}
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    m.main([str(tmp_path / "a.db")])
+    assert "single" in made
+
+
+def test_no_args_is_usage_error():
+    import runstate_tui.__main__ as m
+    assert m.main([]) == 2
+```
+
+- [ ] **Step 2: Run to verify they fail** — `uv run pytest tests/test_cli.py -q`.
+
+- [ ] **Step 3: Implement in `runstate_tui/__main__.py`**
+
+Import `MultiRunApp` and `explicit_resolver`; branch on the number of run paths:
+```python
+    runs = [a for a in argv if ...]  # keep the existing arg parsing
+    if len(runs) >= 2:
+        from .multirun import MultiRunApp
+        from .resolver import explicit_resolver, ref_from_path
+        MultiRunApp(explicit_resolver([ref_from_path(p) for p in runs]), Env(clock=time.time)).run()
+        return 0
+    # else: the existing single-run path (SingleRunApp) unchanged
+```
+Update the usage string to accept one-or-more `<run.db>` paths.
+
+- [ ] **Step 4: Run tests → pass. Step 5: full gates; commit** `feat(cli): multiple run paths -> MultiRunApp`.
 
 ---
 
 ## Self-Review
 
-- **Spec coverage:** fold split + singleton (T1), explicit resolver (T2), LRU pool + watermark-gate + corrupt-containment + per-frame now (T3), owner-thread + keyed reconcile + columns (T4), drill-down for selected (T5), CLI (T6). Deferred set (glob/cells/issue-flood/I-O-stalled) intentionally absent.
-- **Singleton:** T1's `test_status_fold_equals_derive_clock_of_fold_log` + the whole unchanged `test_fold.py` guard the composition; add an explicit table-vs-single-run singleton test in T4 (drive a tick, assert the table's row for `r` equals `render_single(r)`).
-- **Placeholders:** T1/T3/T4 note two "verify the exact API" points (`Env.stuck_threshold`, the Textual 8.2.8 `DataTable` row-key/`update_cell` accessors) — the implementer confirms empirically, not guesses; all other code is complete.
-- **Type consistency:** `LogSnapshot`, `fold_log(channel, objective)`, `derive_clock(snap, now, stuck_threshold)`, `Table`, `ChannelPool`, `fold_frame`, `explicit_resolver`, `MultiRunApp`, `TableReady` names match across tasks.
+- **Spec coverage:** explicit resolver + ref_key (T1); `fold_open_channel` extraction + LRU RunRef-keyed pool + fold-fresh `fold_frame` + corrupt-containment + per-frame `now` + LRU + reconcile (T2); owner-thread worker + keyed reconcile (C's `batch_update`/column-key/`move_cursor` fixes) + `⚠ I/O stalled` watchdog + async teardown drain (T3); drill-down for the selected run (T4); CLI (T5). Rejected watermark-gating and deferred glob/cells/issue-flood/I-O-recovery intentionally absent. **fold.py/types.py unchanged** (no split).
+- **Singleton:** T2's `test_fold_frame_row_equals_render_single` proves the pooled path equals `render_single` at a shared `now`; T2's parity test proves `fold_open_channel` didn't shift behavior.
+- **Red-team fixes folded in:** C-crit-1 (`self.batch_update()`, `(label,key)` columns, `move_cursor`), C-crit-2 + C-imp-4 (async `on_unmount` drain + `_TEARDOWN_ERRORS` guard + `_closing`), C-imp-3 (serialization comment), C-minor (`action_detail` reconstructs refs, direct `post_message`); B-2b (full-RunRef pool key + `ref_key` row key + distinctness test); B-1a/2a dissolved by fold-fresh; A-crit (`⚠ I/O stalled` watchdog in the MVP).
+- **Placeholders:** T3 flags three "confirm against Textual 8.2.8" points (`wait_for_complete` awaitability, `Static.update("")` hiding, `pilot.pause()` counts) — the implementer verifies empirically, not guesses; all logic is complete. T4 flags one (`DrillDownScreen`'s ref attribute name) — read `detail.py`.
+- **Type consistency:** `explicit_resolver`, `ref_key`, `fold_open_channel(channel, env)`, `Table`, `ChannelPool(cap=…)`/`row_for`/`reconcile`/`close_all`, `fold_frame(pool, refs, env, now)`, `MultiRunApp(resolver, env, *, tick_interval, pool_cap, stall_ticks)`, `TableReady`, `_cells`/`_marker` names match across tasks.
