@@ -16,6 +16,11 @@ from .types import Row, Severity
 
 _COLUMNS = ("run", "status", "step", "age", "value", "elapsed", "!")
 
+# How long on_unmount waits for the owner thread to finish its in-flight fold before
+# giving up and LEAKING the pool (see on_unmount) rather than hanging quit forever on a
+# wedged thread.
+_DRAIN_TIMEOUT = 5.0
+
 
 def _marker(row: Row) -> str:
     """A compact per-row severity glyph (keeps the table below the ISA-18.2 flood line).
@@ -106,7 +111,7 @@ class MultiRunApp(App[None]):
         if not self._closing:
             self._fold_frame()
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, exit_on_error=False)
     def _fold_frame(self) -> None:  # the single owner thread — owns the whole pool
         # clear _idle as the FIRST statement -- before even the _closing check -- so
         # on_unmount's drain can never observe "idle" while this invocation still might
@@ -119,10 +124,22 @@ class MultiRunApp(App[None]):
             table = fold_frame(self._pool, self._resolver(now), self._env, now)
             try:
                 self.post_message(TableReady(table))  # post_message is thread-safe on its own
-                self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
             except _TEARDOWN_ERRORS:
                 pass  # a quit landed mid-frame; drop the marshal
         finally:
+            # Reschedule in the FINALLY so an unexpected raise from fold_frame above still
+            # self-heals the tick chain instead of silently killing it. Paired with
+            # exit_on_error=False (a bug in one frame must not crash the whole cockpit), a
+            # transient fold raise recovers on the next tick and a *persistent* one degrades
+            # into a retry loop the watchdog surfaces as ⚠ I/O stalled -- loud, not a silent
+            # freeze (§10 satisfied via the watchdog, the multi-run analogue of app.py's
+            # fail-fast crash). Guarded on _closing so teardown never re-arms the loop, and
+            # wrapped in _TEARDOWN_ERRORS so a quit landing mid-marshal is dropped, not raised.
+            if not self._closing:
+                try:
+                    self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
+                except _TEARDOWN_ERRORS:
+                    pass
             self._idle.set()  # always -- even on an early return or an unexpected raise
 
     def on_table_ready(self, msg: TableReady) -> None:  # MAIN thread: keyed reconcile
@@ -149,6 +166,10 @@ class MultiRunApp(App[None]):
                         t.update_cell(key, col, val)
                 else:
                     t.add_row(*cells, key=key)
+                    # a resolver that yields the same ref twice this frame must UPDATE the
+                    # row it just added, never re-add it (add_row on a live key raises
+                    # DuplicateKey) -- so mark it present the instant it is added.
+                    present.add(key)
             t.sort("run")
             if sel is not None and sel in want:
                 # sort() doesn't track the selected row key; restore it explicitly.
@@ -184,6 +205,15 @@ class MultiRunApp(App[None]):
         self._closing = True
         # drain the in-flight fold via the threading.Event, NOT workers.wait_for_complete()
         # -- see _idle's docstring in __init__ for why the latter doesn't actually wait for
-        # the OS thread. run_in_executor awaits the blocking Event.wait() off the event loop.
-        await asyncio.get_running_loop().run_in_executor(None, self._idle.wait)
-        self._pool.close_all()  # now safe: owner thread idle
+        # the OS thread. run_in_executor awaits the blocking Event.wait() off the event loop,
+        # BOUNDED by _DRAIN_TIMEOUT so a wedged owner thread can't hang quit forever.
+        drained = await asyncio.get_running_loop().run_in_executor(
+            None, self._idle.wait, _DRAIN_TIMEOUT
+        )
+        if drained:
+            self._pool.close_all()  # owner thread idle -> safe to close the handles
+        # else: the owner thread is STILL mid-fold past _DRAIN_TIMEOUT. Closing a sqlite
+        # connection out from under an in-flight read is undefined behavior, so we LEAK the
+        # pooled handles rather than close_all() into a live reader; the OS reclaims the fds
+        # at process exit. A bounded quit that leaks beats a use-after-close race on a
+        # wedged thread.
