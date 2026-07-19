@@ -366,6 +366,20 @@ async def _slash_focuses(tmp_path):
         assert screen.focused is inp
 
 
+def _chip_glyph_style(content: Text, family: str) -> str | None:
+    """The rendered style of `family`'s '●' chip glyph in `#detail-chips`'s Text.
+    `_render_chips` colors only the leading '●' per family (the label/count trail
+    that follows is plain, unstyled text) -- so `Text.from_markup` produces exactly
+    one Span per family, covering just that glyph, and the spans appear in the same
+    left-to-right order as `_FAMILIES` (the loop `_render_chips` builds the markup
+    from) -- confirmed empirically against the installed `rich` wheel. Mirrors
+    `test_drilldown_renders_card_and_newest_first_table`'s `topics[i].style ==
+    topic_color(...)` pattern, but chips join several colored runs into one Text
+    instead of one color per cell, hence indexing into `.spans` rather than `.style`."""
+    idx = detail_module._FAMILIES.index(family)
+    return content.spans[idx].style
+
+
 def test_number_key_toggles_family_and_updates_chips(tmp_path):
     asyncio.run(_number_toggles(tmp_path))
 
@@ -384,9 +398,74 @@ async def _number_toggles(tmp_path):
         await pilot.pause()
         assert "value" not in screen._enabled
         assert t.row_count < before
-        chips = screen.query_one("#detail-chips", Static).content.plain
-        assert "grey37" not in chips  # markup is resolved, not literal text
+        content = screen.query_one("#detail-chips", Static).content
+        assert isinstance(content, Text)
+        # dim: the toggled-off family's glyph renders in the dim color, not its
+        # normal topic color -- this fails if `_render_chips`'s on/off branch breaks
+        assert _chip_glyph_style(content, "value") == "grey37"
         await pilot.press("2")  # toggle it back on
         await pilot.pause()
         assert "value" in screen._enabled
         assert t.row_count == before
+        content = screen.query_one("#detail-chips", Static).content
+        assert isinstance(content, Text)
+        # lit: back to its normal topic color once re-enabled
+        assert _chip_glyph_style(content, "value") == topic_color("value.")
+
+
+def test_escape_in_filter_cancels_not_pops(tmp_path):
+    asyncio.run(_escape_cancels_filter(tmp_path))
+
+
+async def _escape_cancels_filter(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+        before = t.row_count
+
+        screen.action_filter()  # reveals + focuses the filter Input
+        await pilot.pause()
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert screen.focused is inp
+
+        screen._filter_text = "control"  # simulate a half-typed filter
+        screen._render_window()
+        assert t.row_count < before  # confirms the filter actually narrowed first
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.screen is screen  # still the DrillDownScreen -- not popped
+        assert screen._filter_text == ""
+        assert inp.display is False
+        assert t.row_count == before  # unfiltered again
+
+
+def test_escape_pops_when_filter_not_focused(tmp_path):
+    asyncio.run(_escape_pops_unfocused(tmp_path))
+
+
+async def _escape_pops_unfocused(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert screen.focused is not inp  # the log table holds focus by default
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, DrillDownScreen)  # popped, unchanged behavior

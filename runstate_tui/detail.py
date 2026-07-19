@@ -8,7 +8,7 @@ from typing import Any
 
 from rich.text import Text
 from runstate.channel import Envelope
-from textual import work
+from textual import events, work
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
@@ -184,6 +184,27 @@ class DrillDownScreen(Screen[None]):
     def on_input_changed(self, msg: Input.Changed) -> None:
         self._filter_text = msg.value
         self._render_window()
+
+    def on_key(self, event: events.Key) -> None:
+        # `escape` while the filter Input is focused should cancel the text filter,
+        # not pop the screen: the BINDINGS entry above (`("escape", "app.pop_screen",
+        # ...)`) only fires once this Key message bubbles, unstopped, all the way to
+        # the App's binding resolution -- and a screen-level `on_key` is invoked
+        # BEFORE that (Textual's MRO-ordered dispatch calls the most-derived class's
+        # `on_key` ahead of the inherited `Widget._on_key`, confirmed against the
+        # installed 8.2.8 wheel's `message_pump.py::_get_dispatch_methods`), so
+        # `event.stop()` here consumes it first and the pop binding never sees it.
+        # Toggle state (`_enabled`) is untouched -- only the text filter is cancelled.
+        if event.key != "escape":
+            return
+        inp = self.query_one("#detail-filter-input", Input)
+        if self.focused is not inp:
+            return  # not filtering -- let `escape` bubble to the normal pop binding
+        self._filter_text = ""
+        inp.display = False
+        self.query_one("#detail-log", DataTable).focus()
+        self._render_window()
+        event.stop()
 
     def action_toggle_family(self, family: str) -> None:
         self._enabled.symmetric_difference_update({family})
