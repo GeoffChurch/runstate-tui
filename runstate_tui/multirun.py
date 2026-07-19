@@ -25,7 +25,7 @@ _DRAIN_TIMEOUT = 5.0
 def _marker(row: Row) -> str:
     """A compact per-row severity glyph (keeps the table below the ISA-18.2 flood line).
     row.severity already folds status + issues (CORRUPT/UNREADABLE -> HIGH)."""
-    stops = f"⏹{len(row.undischarged_stops)}" if row.undischarged_stops else ""
+    stops = f"■{len(row.undischarged_stops)}" if row.undischarged_stops else ""
     if row.severity >= Severity.HIGH:
         return f"⚠⚠{stops}"
     if row.severity >= Severity.MEDIUM:

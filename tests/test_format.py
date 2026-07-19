@@ -77,7 +77,7 @@ def test_format_row_flags_undischarged_stops():
 
     stop = Envelope(seq=5, topic="control.stop", name=None, request_id="webui:s", body={})
     text = format_row(_row(frontier=3, undischarged_stops=(stop,)))
-    assert "⏹1" in text
+    assert "■1" in text
 
 
 def test_format_envelope_is_a_compact_one_liner():

@@ -21,7 +21,7 @@ def format_row(row: Row) -> str:
     if row.elapsed is not None:
         parts.append(f"ran {row.elapsed:.0f}s")
     if row.undischarged_stops:
-        parts.append(f"⏹{len(row.undischarged_stops)}")
+        parts.append(f"■{len(row.undischarged_stops)}")
     for issue in row.issues:
         parts.append(f"⚠ {issue.message}")
     return "  ".join(parts)
