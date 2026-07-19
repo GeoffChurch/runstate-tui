@@ -1,3 +1,6 @@
+import sqlite3
+
+import pytest
 from runstate import open_channel
 
 from runstate_tui.env import Env
@@ -56,8 +59,12 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
     refs = [_seed(tmp_path, f"r{i}") for i in range(3)]
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=2)
-    fold_frame(pool, refs, env, 150.0)
+    fold_frame(pool, [refs[0]], env, 150.0)  # open r0 alone
+    ch0 = pool._open[refs[0]]  # capture its handle
+    fold_frame(pool, refs, env, 151.0)  # r0 is the LRU -> evicted + closed
     assert len(pool) <= 2  # LRU kept the pool bounded
+    with pytest.raises(sqlite3.ProgrammingError):
+        ch0.read(after=0)  # evicted handle was actually closed
     pool.close_all()
 
 
@@ -68,6 +75,9 @@ def test_reconcile_closes_runs_that_left_the_resolver(tmp_path):
     pool = ChannelPool(cap=8)
     fold_frame(pool, [a, b], env, 150.0)
     assert len(pool) == 2
+    ch_b = pool._open[b]  # capture b's handle
     fold_frame(pool, [a], env, 151.0)
     assert len(pool) == 1  # b dropped + closed
+    with pytest.raises(sqlite3.ProgrammingError):
+        ch_b.read(after=0)  # b's handle was actually closed
     pool.close_all()
