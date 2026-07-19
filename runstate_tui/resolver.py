@@ -17,3 +17,22 @@ def ref_from_path(path: str) -> RunRef:
     """A sqlite run log lives at ``<root>/<run_id>.db``; split a path into its RunRef."""
     p = Path(path)
     return (p.stem, str(p.parent), "sqlite")
+
+
+def explicit_resolver(refs: list[RunRef]) -> Resolver:
+    """A fixed IndexSet — the safe (no create=False) multi-run resolver. Exact
+    duplicate refs are dropped (order preserved) so each run is one pooled channel
+    and one DataTable row."""
+    snapshot = list(dict.fromkeys(refs))
+
+    def resolve(_now: float) -> list[RunRef]:
+        return list(snapshot)
+
+    return resolve
+
+
+def ref_key(ref: RunRef) -> str:
+    """A stable, collision-proof string key for a RunRef (run_id alone collides:
+    a/run1.db and b/run1.db both have run_id 'run1'). NUL can't appear in a path,
+    so it is a safe join separator."""
+    return "\x00".join(ref)
