@@ -469,3 +469,25 @@ async def _escape_pops_unfocused(tmp_path):
         await pilot.pause()
 
         assert not isinstance(app.screen, DrillDownScreen)  # popped, unchanged behavior
+
+
+def test_drilldown_snapshot(snap_compare, tmp_path):
+    """Layout snapshot for the redesigned DrillDownScreen (task-7-brief.md): the
+    two-region shell (compact card + newest-first colored/zebra log table + chips +
+    footer) over `_seed_rich`, following the `snap_compare` convention established in
+    `tests/scenarios/test_table_plane.py` -- the prior flat-text drilldown snapshot was
+    removed by the redesign (task-3); this is its replacement, sized like this file's
+    other DrillDownScreen tests (90, 22)."""
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+
+    async def _settle(pilot):
+        for _ in range(60):
+            await pilot.pause(0.02)
+            screen = pilot.app.screen
+            if isinstance(screen, DrillDownScreen):
+                t = screen.query_one("#detail-log", DataTable)
+                if t.row_count == 5:
+                    break
+
+    assert snap_compare(app, run_before=_settle, terminal_size=(90, 22))
