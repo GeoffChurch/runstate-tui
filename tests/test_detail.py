@@ -324,6 +324,41 @@ async def _filter(tmp_path):
         assert all("control" in x for x in topics) and t.row_count >= 1
 
 
+def test_on_input_changed_narrows_via_the_real_widget(tmp_path):
+    asyncio.run(_on_input_changed(tmp_path))
+
+
+async def _on_input_changed(tmp_path):
+    # exercises on_input_changed's actual wiring (a real Input.Changed message ->
+    # self._filter_text -> _render_window), unlike test_filter_narrows_to_matching_rows
+    # above (and its UPSTREAM(runstate#15) test-lock), which sets `_filter_text`
+    # directly and calls `_render_window()` itself, bypassing the handler entirely.
+    ref = _seed_rich(tmp_path)  # 5 rows incl. control.* and lifecycle.*
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DrillDownScreen)
+        t = screen.query_one("#detail-log", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.02)
+            if t.row_count == 5:
+                break
+        before = t.row_count
+
+        screen.action_filter()  # reveals + focuses the filter Input
+        await pilot.pause()
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert screen.focused is inp
+
+        await pilot.press(*"control")  # types into the real Input -> posts Input.Changed
+        await pilot.pause()
+
+        assert screen._filter_text == "control"
+        topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
+        assert topics and all("control" in x for x in topics) and t.row_count < before
+
+
 def test_toggle_hides_a_family(tmp_path):
     asyncio.run(_toggle(tmp_path))
 

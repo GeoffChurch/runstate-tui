@@ -250,10 +250,16 @@ class DrillDownScreen(Screen[None]):
         # raw and filters the window in _render_window. grep -rn "UPSTREAM(runstate#15)"
         delta = read_log_delta(self._ref, after=self._cursor)
         if delta:
-            self._window.extend(delta)  # oldest..newest; deque(maxlen) trims the front
-            self._cursor = delta[-1].seq
-            self._marshal(self._render_window)
+            self._marshal(self._absorb, delta)  # main-thread: mutate window/cursor + render
         self._marshal(self.set_timer, self._tick_interval, self._tick)
+
+    def _absorb(self, delta: list[Envelope]) -> None:
+        """Main-thread only: apply the delta to the window + advance the cursor + repaint.
+        All self._window mutation happens here (or nowhere), so the main-thread key
+        handlers that read self._window never race the worker."""
+        self._window.extend(delta)  # oldest..newest; deque(maxlen) trims the front
+        self._cursor = delta[-1].seq
+        self._render_window()
 
 
 class ExpandScreen(ModalScreen[None]):
