@@ -241,3 +241,64 @@ async def _live_tail(tmp_path):
         assert t.row_count == 2
         assert screen._cursor == 2
     w.close()
+
+
+def test_yank_copies_selected_envelope(tmp_path, monkeypatch):
+    asyncio.run(_yank(tmp_path, monkeypatch))
+
+
+async def _yank(tmp_path, monkeypatch):
+    ref = _seed_rich(tmp_path)
+    copied = {}
+    app = _HostApp(ref)
+    monkeypatch.setattr(
+        type(app), "copy_to_clipboard", lambda self, text: copied.setdefault("t", text)
+    )
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("y")  # yank the selected (top = seq 5, control.stop) row
+        assert "control.stop" in copied["t"] and "5" in copied["t"]
+
+
+def test_enter_expands_then_escape_returns(tmp_path):
+    asyncio.run(_expand(tmp_path))
+
+
+async def _expand(tmp_path):
+    from runstate_tui.detail import ExpandScreen
+
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ExpandScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, ExpandScreen)
+
+
+def test_expand_screen_yank_copies_envelope(tmp_path, monkeypatch):
+    asyncio.run(_expand_yank(tmp_path, monkeypatch))
+
+
+async def _expand_yank(tmp_path, monkeypatch):
+    from runstate_tui.detail import ExpandScreen
+
+    ref = _seed_rich(tmp_path)
+    copied = {}
+    app = _HostApp(ref)
+    monkeypatch.setattr(
+        type(app), "copy_to_clipboard", lambda self, text: copied.setdefault("t", text)
+    )
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ExpandScreen)
+        await pilot.press("y")
+        assert "control.stop" in copied["t"] and "5" in copied["t"]

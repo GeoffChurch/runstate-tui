@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -11,11 +12,11 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Static
 
 from .env import Env
-from .format import format_summary_card, topic_color
+from .format import format_envelope, format_summary_card, topic_color
 from .resolver import RunRef
 from .table import envelope_filter, read_log_delta, render_single
 
@@ -53,7 +54,11 @@ class DrillDownScreen(Screen[None]):
     (`deque(maxlen=log_cap)` trims the front), and advances the cursor to the delta's
     last seq -- never re-reading what's already been drained."""
 
-    BINDINGS = [("escape", "app.pop_screen", "Back")]
+    # `enter` is NOT bound here: DataTable (focused, cursor_type="row") binds `enter`
+    # itself (-> its own action_select_cursor -> a RowSelected message) and intercepts
+    # the key before it ever reaches a screen binding -- the same gotcha Stage 4 hit.
+    # Expand is wired off that message instead (`on_data_table_row_selected` below).
+    BINDINGS = [("escape", "app.pop_screen", "Back"), ("y", "yank", "Yank")]
 
     CSS = """
     #detail-card { border: round $panel; height: auto; padding: 0 1; }
@@ -140,6 +145,33 @@ class DrillDownScreen(Screen[None]):
             parts.append(f"[{col}]●[/] {f} {counts[f]}")
         self.query_one("#detail-chips", Static).update(Text.from_markup("   ".join(parts)))
 
+    def _selected_envelope(self) -> Envelope | None:
+        """The Envelope under the DataTable cursor, mapped back through its row key
+        (`str(e.seq)`, set in `_render_window`) to `self._window` -- the table only
+        ever holds the seq as a string cell/key, never the Envelope itself."""
+        t = self.query_one("#detail-log", DataTable)
+        if not t.row_count:
+            return None
+        key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
+        if key is None:
+            return None
+        return next((e for e in self._window if e.seq == int(key)), None)
+
+    def action_yank(self) -> None:
+        e = self._selected_envelope()
+        if e is not None:
+            self.app.copy_to_clipboard(format_envelope(e))  # OSC 52, via App.copy_to_clipboard
+
+    def action_expand(self) -> None:
+        e = self._selected_envelope()
+        if e is not None:
+            self.app.push_screen(ExpandScreen(e))
+
+    def on_data_table_row_selected(self, _msg: DataTable.RowSelected) -> None:
+        # `enter` on the focused DataTable fires this (its own binding, not ours --
+        # see the BINDINGS comment above); route it to the same expand action.
+        self.action_expand()
+
     def _marshal(self, fn: Callable[..., Any], *args: Any) -> None:
         # a pop mid-tick can tear the screen down before this marshals; the
         # card/log update is best-effort (the fold is re-run each tick anyway).
@@ -169,3 +201,28 @@ class DrillDownScreen(Screen[None]):
             self._cursor = delta[-1].seq
             self._marshal(self._render_window)
         self._marshal(self.set_timer, self._tick_interval, self._tick)
+
+
+class ExpandScreen(ModalScreen[None]):
+    """The full pretty-printed envelope for one log row, pushed by `enter`
+    (`DrillDownScreen.action_expand`). `escape` pops back; `y` yanks the same
+    `format_envelope` line the underlying screen's yank would (not the pretty body --
+    one canonical clipboard shape, faithful to the raw envelope either way)."""
+
+    BINDINGS = [("escape", "app.pop_screen", "Back"), ("y", "yank", "Yank")]
+
+    def __init__(self, envelope: Envelope) -> None:
+        super().__init__()
+        self._e = envelope
+
+    def compose(self) -> ComposeResult:
+        e = self._e
+        body = (
+            json.dumps(e.body, indent=2, default=str) if isinstance(e.body, dict) else str(e.body)
+        )
+        yield Static(
+            Text(f"seq {e.seq}   {e.topic}   {e.request_id or ''}\n\n{body}"), id="expand-body"
+        )
+
+    def action_yank(self) -> None:
+        self.app.copy_to_clipboard(format_envelope(self._e))
