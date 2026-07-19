@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from runstate import open_channel
-from runstate.channel import Envelope
+from runstate.channel import Channel, Envelope
 
 from .env import Env
 from .fold import locate_torn_seq, status_fold
@@ -48,6 +48,19 @@ def _corrupt(seq: int | None) -> Row:
     )
 
 
+def fold_open_channel(channel: Channel, env: Env) -> Row:
+    """Fold an ALREADY-OPEN channel with the integrity guards, WITHOUT closing it.
+    A byte-torn (json.JSONDecodeError) -> loud `corrupt` carrying the located seq; a
+    substrate fault mid-read -> `unreadable`. open_and_fold closes in its own finally;
+    the pool keeps the handle and re-uses it next tick (folding fresh)."""
+    try:
+        return status_fold(channel, env)
+    except json.JSONDecodeError:
+        return _corrupt(locate_torn_seq(channel))
+    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
+        return _bare(Status.unreadable())
+
+
 def open_and_fold(ref: RunRef, env: Env) -> Row:
     run_id, root, backend = ref
     # stat-before-open (sqlite): a missing pointer must NOT open_channel (that would
@@ -66,15 +79,7 @@ def open_and_fold(ref: RunRef, env: Env) -> Row:
     except _OPEN_ERRORS:
         return _bare(Status.unreadable())  # corrupt/foreign/unopenable db
     try:
-        return status_fold(channel, env)
-    except json.JSONDecodeError:
-        # byte-torn (an atomicity violation): NOT unreadable (that would be lossy) and
-        # NOT a crash — a distinct, loud `corrupt` status carrying the located seq.
-        return _corrupt(locate_torn_seq(channel))
-    except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
-        return _bare(Status.unreadable())  # substrate fault mid-read (a corrupt db
-        # fails every read); json.JSONDecodeError is caught above, not here — it is
-        # not a subclass of sqlite3.DatabaseError/OSError, so order is for clarity.
+        return fold_open_channel(channel, env)
     finally:
         channel.close()
 

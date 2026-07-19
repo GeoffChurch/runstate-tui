@@ -6,9 +6,11 @@ import pytest
 from runstate import open_channel
 
 from runstate_tui.env import Env
+from runstate_tui.fold import status_fold
 from runstate_tui.resolver import const_resolver
 from runstate_tui.table import open_and_fold, render_single, render_table
 from runstate_tui.types import IssueKind, Severity, StatusKind
+from tests.helpers import corrupt_seq
 
 
 def _env(now=150.0, **kw):
@@ -176,3 +178,23 @@ def test_read_log_delta_byte_torn_is_empty(torn_sqlite_channel, tmp_path):
     from runstate_tui.table import read_log_delta
 
     assert read_log_delta(("torn", str(tmp_path), "sqlite"), after=0) == []
+
+
+def test_fold_open_channel_matches_status_fold_on_a_healthy_run(build_log):
+    from runstate_tui.table import fold_open_channel
+
+    ch = build_log([({"handle": "h", "t": 100.0}, "lifecycle.started", None)])
+    env = _env(150.0)  # the module's Env helper
+    assert fold_open_channel(ch, env) == status_fold(ch, env)
+
+
+def test_fold_open_channel_maps_byte_torn_to_corrupt(tmp_path):
+    from runstate_tui.table import fold_open_channel
+
+    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
+    ch.close()
+    corrupt_seq(tmp_path, "r", 1, literal="{not json")
+    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    assert fold_open_channel(ch, _env(150.0)).status.kind is StatusKind.CORRUPT
+    ch.close()
