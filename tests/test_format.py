@@ -4,6 +4,12 @@ from runstate_tui.format import format_row
 from runstate_tui.types import Issue, IssueKind, Row, Severity, Status
 
 
+def _env_stub():
+    from runstate.channel import Envelope
+
+    return Envelope(seq=1, topic="control.stop", name=None, request_id=None, body={})
+
+
 def _row(**kw):
     base = dict(
         status=Status.live(),
@@ -176,3 +182,36 @@ def test_status_color_maps_kinds_and_outcomes():
     assert status_color(Status.error()) == "#f85149"
     assert status_color(Status.terminal(Outcome.COMPLETED)) == "#539bf5"
     assert status_color(Status.terminal(Outcome.ERRORED)) == "#f85149"
+
+
+def test_topic_color_by_family():
+    from runstate_tui.format import topic_color
+
+    assert topic_color("lifecycle.started") == "#539bf5"
+    assert topic_color("control.stop") == "#d29922"
+    assert topic_color("value") == "#3fb950"
+    assert topic_color("something.else") == "#8b949e"
+
+
+def test_summary_card_is_two_compact_lines_with_counts():
+    from rich.text import Text
+
+    from runstate_tui.format import format_summary_card
+
+    row = _row(  # a live run w/ 1 stop, 1 demand
+        status=Status.live(),
+        frontier=1450,
+        freshness=8.0,
+        value=("loss", 0.0123, 1450),
+        elapsed=20.0,
+        episode="local://h/1",
+        undischarged_stops=(_env_stub(),),  # len 1
+        live_demand=(_env_stub(),),  # len 1
+    )
+    card = format_summary_card(row)
+    assert isinstance(card, Text)
+    plain = card.plain
+    assert "live" in plain and "loss=0.0123" in plain  # line 1: the summary
+    assert "episode local://h/1" in plain  # line 2: episode
+    assert "1 stop pending" in plain and "1 demand" in plain  # line 2: COUNTS, not lists
+    assert plain.count("\n") == 1  # exactly two lines

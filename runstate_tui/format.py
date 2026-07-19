@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from rich.text import Text
 from runstate.channel import Envelope
 from runstate.observables import Outcome
 
 from .types import Row, Status, StatusKind
 
+_TOPIC_COLORS = {"lifecycle": "#539bf5", "control": "#d29922", "value": "#3fb950"}
 _STATUS_COLORS = {
     StatusKind.LIVE: "#3fb950",
     StatusKind.STALE: "#d29922",
@@ -35,6 +37,12 @@ def status_color(status: Status) -> str:
     return _STATUS_COLORS.get(status.kind, "#8b949e")
 
 
+def topic_color(topic: str) -> str:
+    """A hex color for a log topic, by family (mirrors status_color). Redundant with
+    the topic text — never the sole signal."""
+    return _TOPIC_COLORS.get(topic.split(".")[0], "#8b949e")
+
+
 def format_row(row: Row) -> str:
     """Render a Row as one human line; absent factors are omitted."""
     label = row.status.label
@@ -55,6 +63,23 @@ def format_row(row: Row) -> str:
     for issue in row.issues:
         parts.append(f"⚠ {issue.message}")
     return "  ".join(parts)
+
+
+def format_summary_card(row: Row) -> Text:
+    """The drill-down's compact 2-line header card: the one-line summary (with the
+    status dot) + episode and COUNTS. The full stop/demand/issue lists live in the
+    enter-expand, not here."""
+    line1 = Text("● ", style=status_color(row.status))
+    line1.append(format_row(row))  # the existing one-line summary
+    parts = [f"episode {row.episode}" if row.episode else "episode —"]
+    if row.undischarged_stops:
+        parts.append(f"■ {len(row.undischarged_stops)} stop pending")
+    if row.live_demand:
+        parts.append(f"◆ {len(row.live_demand)} demand")
+    if row.issues:
+        parts.append(f"⚠ {len(row.issues)} issue" + ("s" if len(row.issues) != 1 else ""))
+    line2 = Text("     ".join(parts))
+    return Text("\n").join([line1, line2])
 
 
 def format_envelope(env: Envelope) -> str:
