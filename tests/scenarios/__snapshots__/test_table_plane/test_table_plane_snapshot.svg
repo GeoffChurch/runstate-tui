@@ -36,7 +36,7 @@
 .terminal-r2 { fill: #c5c8c6 }
 .terminal-r3 { fill: #ddedf9;font-weight: bold }
 .terminal-r4 { fill: #e0e0e0 }
-.terminal-r5 { fill: #fd971f }
+.terminal-r5 { fill: #d29922 }
     </style>
 
     <defs>

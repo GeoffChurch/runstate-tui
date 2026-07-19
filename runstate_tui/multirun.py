@@ -24,18 +24,32 @@ _COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
 _DRAIN_TIMEOUT = 5.0
 
 
-def _marker(row: Row) -> str:
+def _marker(row: Row) -> Text:
     """A compact per-row severity glyph (keeps the table below the ISA-18.2 flood line).
-    row.severity already folds status + issues (CORRUPT/UNREADABLE -> HIGH)."""
-    stops = f"■{len(row.undischarged_stops)}" if row.undischarged_stops else ""
-    if row.severity >= Severity.HIGH:
-        return f"⚠⚠{stops}"
-    if row.severity >= Severity.MEDIUM:
-        return f"⚠{stops}"
-    return stops
+    Keyed on ISSUE severity + stop count ONLY -- deliberately NOT row.severity (which
+    also folds in status severity). The leading `dot` cell already carries the status
+    color, so `!` stays on its own orthogonal axis: a `corrupt` row still shows `⚠⚠`
+    (its Issue is HIGH), but a bare `unreadable`/`missing` row (issues=()) shows NO
+    marker at all -- its red/grey dot + status text alone carry that signal, undiluted
+    by a `!` that would otherwise just restate the dot."""
+    issue_sev = max((i.severity for i in row.issues), default=Severity.OK)
+    if issue_sev >= Severity.HIGH:
+        out = Text("⚠⚠", style="#f85149")
+    elif issue_sev >= Severity.MEDIUM:
+        out = Text("⚠", style="#d29922")
+    else:
+        out = Text("")
+    if row.undischarged_stops:
+        # explicit style="default" -- NOT the no-style form -- because Text.append
+        # without a style inherits the base Text's style (verified empirically), which
+        # would silently paint "■N" red/amber whenever it follows a colored ⚠ segment.
+        # An explicit "default" is what actually decouples the stop count from the
+        # issue-severity color.
+        out.append(f"■{len(row.undischarged_stops)}", style="default")
+    return out
 
 
-def _cells(ref: RunRef, row: Row) -> tuple[Text, str, str, str, str, str, str, str]:
+def _cells(ref: RunRef, row: Row) -> tuple[Text, str, str, str, str, str, str, Text]:
     """The 8 column cells — same field semantics as format_row, one field per column.
     The leading `dot` cell is a traffic-light ● redundant with the `status` text cell
     (never the sole signal)."""

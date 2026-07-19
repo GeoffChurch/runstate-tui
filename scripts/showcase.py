@@ -13,7 +13,7 @@ from runstate import open_channel
 
 from runstate_tui.env import Env
 from runstate_tui.multirun import MultiRunApp
-from runstate_tui.resolver import RunRef, explicit_resolver, ref_key
+from runstate_tui.resolver import RunRef, explicit_resolver
 
 NOW = 300.0
 
@@ -107,9 +107,9 @@ async def scene_table(out_dir: Path) -> Path:
         explicit_resolver(refs), Env(clock=lambda: NOW, objective="loss"), tick_interval=999
     )
 
-    async def before(pilot: object) -> None:  # park the cursor on a healthy (live) row
+    async def before(pilot: object) -> None:  # cursor OFF -- every row's dot shows undimmed
         t = pilot.app.query_one("#runs")  # type: ignore[attr-defined]
-        t.move_cursor(row=t.get_row_index(ref_key(refs[0])))
+        t.cursor_type = "none"
 
     return await capture(app, out_dir / "table.png", before=before, title="runstate-tui — sweep")
 
