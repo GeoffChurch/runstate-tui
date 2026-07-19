@@ -10,7 +10,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from runstate import open_channel
+from textual.app import App
 
+from runstate_tui.app import SingleRunApp
 from runstate_tui.env import Env
 from runstate_tui.multirun import MultiRunApp
 from runstate_tui.resolver import RunRef, explicit_resolver
@@ -30,7 +32,7 @@ def _ch(root: Path, rid: str):
 
 
 async def capture(
-    app: MultiRunApp,
+    app: App[None],
     out: Path,
     *,
     size: tuple[int, int] = (110, 18),
@@ -114,7 +116,107 @@ async def scene_table(out_dir: Path) -> Path:
     return await capture(app, out_dir / "table.png", before=before, title="runstate-tui — sweep")
 
 
-SCENES: dict[str, Callable[[Path], Awaitable[Path]]] = {"table": scene_table}
+async def scene_single(out_dir: Path) -> Path:
+    root = Path(tempfile.mkdtemp())
+    c = _ch(root, "train-mnist")  # one healthy live run
+    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
+    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
+    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
+    c.close()
+    ref: RunRef = ("train-mnist", str(root), "sqlite")
+    app = SingleRunApp(ref, Env(clock=lambda: NOW, objective="loss"), tick_interval=999)
+    return await capture(app, out_dir / "single.png", title="runstate-tui — single run")
+
+
+async def scene_integrity(out_dir: Path) -> Path:
+    root = Path(tempfile.mkdtemp())
+
+    c = _ch(root, "corrupt")  # started + hb, then the hb record byte-torn -> ⚠⚠ + red dot
+    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
+    c.send({"step": 10, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
+    c.close()
+    _corrupt(root, "corrupt", 2, "{not json")
+
+    # not a sqlite database at all -- open_channel raises sqlite3.DatabaseError, caught
+    # by open_and_fold's _OPEN_ERRORS -> unreadable (red dot, no marker). NOT a foreign
+    # *valid* sqlite schema: that's a distinct, already-documented gap (see
+    # tests/scenarios/test_fold_plane.py::test_foreign_valid_db_reads_pending) where
+    # open_channel's `CREATE TABLE IF NOT EXISTS log` silently adopts the file and it
+    # reads back as an ordinary empty `pending` run instead.
+    (root / "unreadable.db").write_bytes(b"this is not a sqlite database")
+
+    # "missing": its .db is never created -- grey dot, no marker.
+
+    c = _ch(root, "malformed")  # started + hb + value, then the value body -> alien int -> ⚠
+    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
+    c.send({"step": 10, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
+    c.send({"value": 0.5, "step": 10, "t": 292.0}, topic="value", name="loss")
+    c.close()
+    _corrupt(root, "malformed", 3, "42")
+
+    refs: list[RunRef] = [
+        (r, str(root), "sqlite") for r in ("corrupt", "unreadable", "missing", "malformed")
+    ]
+    app = MultiRunApp(
+        explicit_resolver(refs), Env(clock=lambda: NOW, objective="loss"), tick_interval=999
+    )
+
+    async def before(pilot: object) -> None:  # cursor OFF -- every row's dot shows undimmed
+        t = pilot.app.query_one("#runs")  # type: ignore[attr-defined]
+        t.cursor_type = "none"
+
+    return await capture(
+        app, out_dir / "integrity.png", before=before, title="runstate-tui — integrity"
+    )
+
+
+async def scene_drilldown(out_dir: Path) -> Path:
+    root = Path(tempfile.mkdtemp())
+    c = _ch(root, "train-mnist")  # a rich run: hb + value + a subscribe + an undischarged stop
+    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
+    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
+    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
+    c.send({"schedule": {}, "names": ["loss"]}, topic="control.subscribe", request_id="webui:sub1")
+    c.send({}, topic="control.stop", request_id="webui:stop1")
+    c.close()
+    ref: RunRef = ("train-mnist", str(root), "sqlite")
+    app = MultiRunApp(
+        explicit_resolver([ref]), Env(clock=lambda: NOW, objective="loss"), tick_interval=999
+    )
+
+    async def before(pilot: object) -> None:  # `enter` on the (sole, pre-selected) row
+        await pilot.press("enter")  # type: ignore[attr-defined]
+        await pilot.pause()  # type: ignore[attr-defined]
+        await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
+
+    return await capture(
+        app, out_dir / "drilldown.png", before=before, title="runstate-tui — drill-down"
+    )
+
+
+async def scene_stop(out_dir: Path) -> Path:
+    root = Path(tempfile.mkdtemp())
+    c = _ch(root, "train-mnist")  # a live run
+    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
+    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
+    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
+    c.close()
+    ref: RunRef = ("train-mnist", str(root), "sqlite")
+    app = SingleRunApp(ref, Env(clock=lambda: NOW, objective="loss"), tick_interval=999)
+
+    async def before(pilot: object) -> None:  # `s` -> the confirm-stop gate
+        await pilot.press("s")  # type: ignore[attr-defined]
+
+    return await capture(app, out_dir / "stop.png", before=before, title="runstate-tui — stop")
+
+
+SCENES: dict[str, Callable[[Path], Awaitable[Path]]] = {
+    "table": scene_table,
+    "single": scene_single,
+    "integrity": scene_integrity,
+    "drilldown": scene_drilldown,
+    "stop": scene_stop,
+}
 
 
 def main(out_dir: str = "docs/img") -> list[Path]:
