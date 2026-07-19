@@ -57,12 +57,12 @@ def _fold_error(exc: Exception) -> Row:
     catastrophic non-fold bugs. The exception rides both the status detail and the Issue
     message so it surfaces in the table's status column AND the drill-down's issue list."""
     detail = f"{type(exc).__name__}: {exc}"
-    # IssueKind.MALFORMED is the closest existing kind ("the fold could not produce a valid
-    # interpretation of this run"); CORRUPT is reserved for a byte-torn log at a known seq.
-    # The kind is an internal tag (never displayed — only `message` renders), so the loud,
-    # faithful signal is StatusKind.ERROR at the status level.
+    # IssueKind.INTERNAL_ERROR: our CODE threw an unexpected exception -- distinct from
+    # MALFORMED (a decodable-but-wrong-shape DATA record) and CORRUPT (a byte-torn log at
+    # a known seq). The kind is an internal tag (never displayed — only `message` renders),
+    # but it is consumed programmatically, so it must stay faithful to its own category.
     issue = Issue(
-        kind=IssueKind.MALFORMED,
+        kind=IssueKind.INTERNAL_ERROR,
         severity=Severity.HIGH,
         message=f"unexpected fold error: {detail}",
     )

@@ -21,6 +21,7 @@ class IssueKind(Enum):
     SKEW_SUSPECTED = "skew_suspected"
     UNSAFE_STOP = "unsafe_stop"
     CORRUPT = "corrupt"
+    INTERNAL_ERROR = "internal_error"
 
 
 @dataclass(frozen=True)
