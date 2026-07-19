@@ -6,7 +6,7 @@ from rich.text import Text
 from runstate import open_channel
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
 from runstate_tui import detail as detail_module
 from runstate_tui.detail import DrillDownScreen
@@ -302,3 +302,91 @@ async def _expand_yank(tmp_path, monkeypatch):
         assert isinstance(app.screen, ExpandScreen)
         await pilot.press("y")
         assert "control.stop" in copied["t"] and "5" in copied["t"]
+
+
+def test_filter_narrows_to_matching_rows(tmp_path):
+    asyncio.run(_filter(tmp_path))
+
+
+async def _filter(tmp_path):
+    ref = _seed_rich(tmp_path)  # 5 rows incl. control.* and lifecycle.*
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        screen._filter_text = "control"
+        screen._render_window()  # simulate typed filter
+        t = screen.query_one("#detail-log", DataTable)
+        topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
+        # UPSTREAM(runstate#15): v1 filters the in-memory window; when #15 lands, this
+        # flips to assert the filter pushes into read_log_delta's read
+        assert all("control" in x for x in topics) and t.row_count >= 1
+
+
+def test_toggle_hides_a_family(tmp_path):
+    asyncio.run(_toggle(tmp_path))
+
+
+async def _toggle(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        before = screen.query_one("#detail-log", DataTable).row_count
+        screen._enabled.discard("lifecycle")
+        screen._render_window()
+        after = screen.query_one("#detail-log", DataTable).row_count
+        assert after < before  # lifecycle rows hidden
+        # the remaining rows are all non-lifecycle (value/control), confirming a real
+        # subtraction rather than an accidental full clear
+        t = screen.query_one("#detail-log", DataTable)
+        topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
+        assert topics and all(not tx.startswith("lifecycle") for tx in topics)
+
+
+def test_slash_focuses_filter_input(tmp_path):
+    asyncio.run(_slash_focuses(tmp_path))
+
+
+async def _slash_focuses(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        inp = screen.query_one("#detail-filter-input", Input)
+        assert inp.display is False  # hidden until "/" is pressed
+        await pilot.press("/")
+        await pilot.pause()
+        assert inp.display is True
+        assert screen.focused is inp
+
+
+def test_number_key_toggles_family_and_updates_chips(tmp_path):
+    asyncio.run(_number_toggles(tmp_path))
+
+
+async def _number_toggles(tmp_path):
+    ref = _seed_rich(tmp_path)
+    app = _HostApp(ref)
+    async with app.run_test(size=(90, 22)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        t = screen.query_one("#detail-log", DataTable)
+        before = t.row_count
+        assert "value" in screen._enabled
+        await pilot.press("2")  # toggle the "value" family off
+        await pilot.pause()
+        assert "value" not in screen._enabled
+        assert t.row_count < before
+        chips = screen.query_one("#detail-chips", Static).content.plain
+        assert "grey37" not in chips  # markup is resolved, not literal text
+        await pilot.press("2")  # toggle it back on
+        await pilot.pause()
+        assert "value" in screen._enabled
+        assert t.row_count == before

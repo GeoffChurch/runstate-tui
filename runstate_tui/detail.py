@@ -13,7 +13,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
 from .env import Env
 from .format import format_envelope, format_summary_card, topic_color
@@ -58,13 +58,20 @@ class DrillDownScreen(Screen[None]):
     # itself (-> its own action_select_cursor -> a RowSelected message) and intercepts
     # the key before it ever reaches a screen binding -- the same gotcha Stage 4 hit.
     # Expand is wired off that message instead (`on_data_table_row_selected` below).
-    BINDINGS = [("escape", "app.pop_screen", "Back"), ("y", "yank", "Yank")]
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("y", "yank", "Yank"),
+        ("/", "filter", "Filter"),
+        ("1", "toggle_family('lifecycle')", "Lifecycle"),
+        ("2", "toggle_family('value')", "Value"),
+        ("3", "toggle_family('control')", "Control"),
+    ]
 
     CSS = """
     #detail-card { border: round $panel; height: auto; padding: 0 1; }
     #detail-logbox { border: round $panel; }
     #detail-log { height: 1fr; }
-    #detail-filter { height: auto; padding: 0 1; }
+    #detail-filter-input { height: auto; padding: 0 1; display: none; }
     #detail-chips { height: auto; padding: 0 1; }
     #detail-foot { height: auto; padding: 0 1; color: $text-muted; }
     """
@@ -84,14 +91,17 @@ class DrillDownScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Static("", id="detail-card")
         with Vertical(id="detail-logbox"):
-            yield Static(
-                Text.from_markup("[grey58]/ filter…   topic · request · step>N · text[/]"),
-                id="detail-filter",
+            yield Input(
+                placeholder="/ filter…   topic · request · step>N · text",
+                id="detail-filter-input",
             )
             yield DataTable(id="detail-log", zebra_stripes=True, cursor_type="row")
             yield Static("", id="detail-chips")
         yield Static(
-            Text.from_markup("[b]y[/] yank   [b]/[/] filter   [b]enter[/] expand   [b]esc[/] back"),
+            Text.from_markup(
+                "[b]y[/] yank   [b]/[/] filter   [b]1/2/3[/] toggle   "
+                "[b]enter[/] expand   [b]esc[/] back"
+            ),
             id="detail-foot",
         )
 
@@ -100,6 +110,11 @@ class DrillDownScreen(Screen[None]):
         self.query_one("#detail-logbox").border_title = "log · live · newest ↑"
         t = self.query_one("#detail-log", DataTable)
         t.add_columns(*_LOG_COLS)
+        # the filter Input precedes the table in DOM order and stays `focusable` even
+        # while `display: none` (Textual's `visible` -- what gates focus eligibility --
+        # tracks the `visibility` rule, not `display`), so auto-focus would otherwise
+        # land there first; claim the table explicitly instead.
+        t.focus()
         self._tick()
 
     def _tick(self) -> None:
@@ -156,6 +171,23 @@ class DrillDownScreen(Screen[None]):
         if key is None:
             return None
         return next((e for e in self._window if e.seq == int(key)), None)
+
+    def action_filter(self) -> None:
+        # reveals + focuses the filter Input (hidden by default via CSS `display: none`);
+        # while it holds focus, Input's own `_on_key` stops every printable key
+        # (including digits and "/") before it can bubble up to these screen
+        # bindings, so the family toggles below never misfire into typed text.
+        inp = self.query_one("#detail-filter-input", Input)
+        inp.display = True
+        inp.focus()
+
+    def on_input_changed(self, msg: Input.Changed) -> None:
+        self._filter_text = msg.value
+        self._render_window()
+
+    def action_toggle_family(self, family: str) -> None:
+        self._enabled.symmetric_difference_update({family})
+        self._render_window()
 
     def action_yank(self) -> None:
         e = self._selected_envelope()
