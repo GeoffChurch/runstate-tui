@@ -2,7 +2,7 @@ import sqlite3
 from itertools import count
 
 import pytest
-from runstate import open_channel
+from runstate import create_channel
 
 from runstate_tui.env import Env
 
@@ -15,14 +15,14 @@ def build_log():
 
     def _build(records):
         run_id = f"run-{next(_ids)}"
-        writer = open_channel(run_id, backend="memory")
+        writer = create_channel(run_id, backend="memory")
         opened.append(writer)
         for record in records:
             # 3-tuple (body, topic, name) OR 4-tuple (body, topic, name, request_id);
             # *rest keeps every existing 3-tuple caller working unchanged.
             body, topic, name, *rest = record
             writer.send(body, topic=topic, name=name, request_id=rest[0] if rest else None)
-        reader = open_channel(run_id, backend="memory")  # a fresh reader on the same log
+        reader = create_channel(run_id, backend="memory")  # a fresh reader on the same log
         opened.append(reader)
         return reader
 
@@ -74,8 +74,10 @@ def answer_on_sleep():
 @pytest.fixture
 def foreign_db(tmp_path):
     """A VALID sqlite file at `<tmp_path>/ghost.db` with an alien (non-runstate)
-    schema, written directly (never through open_channel) — the "real sqlite
-    file, wrong shape" case distinct from a corrupt/non-sqlite file."""
+    schema, written directly (never through a runstate locator) — the "real sqlite
+    file, wrong shape" case distinct from a corrupt/non-sqlite file. Under
+    `attach_channel` this now reads as `missing` (no `log` table -> RunNotFound)
+    and is left byte-identical (the old open-mutates-foreign-db bug is fixed)."""
     run_id = "ghost"
     conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))
     try:
@@ -93,7 +95,7 @@ def held_writer_sqlite_run(tmp_path):
     test — `send(body, topic, **kw)` appends live to the run while it's being
     observed. Closed in teardown."""
     run_id = "held"
-    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     ref = (run_id, str(tmp_path), "sqlite")
 
     def send(body, topic, **kw):
@@ -113,7 +115,7 @@ def rich_run():
 
     def _build():
         run_id = f"rich-{next(_ids)}"
-        writer = open_channel(run_id, backend="memory")
+        writer = create_channel(run_id, backend="memory")
         opened.append(writer)
         writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
         writer.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
@@ -124,7 +126,7 @@ def rich_run():
             request_id="webui:sub1",
         )
         writer.send({}, topic="control.stop", request_id="webui:stop1")
-        reader = open_channel(run_id, backend="memory")  # a fresh reader on the same log
+        reader = create_channel(run_id, backend="memory")  # a fresh reader on the same log
         opened.append(reader)
         return reader
 
@@ -139,7 +141,7 @@ def torn_sqlite_channel(tmp_path):
 
     def _build(records, torn_seq):
         run_id = "torn"
-        writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+        writer = create_channel(run_id, root=tmp_path, backend="sqlite")
         for body, topic, name in records:
             writer.send(body, topic=topic, name=name)
         writer.close()  # closed before the file is corrupted below; nothing to track
@@ -148,7 +150,7 @@ def torn_sqlite_channel(tmp_path):
         conn.execute("UPDATE log SET body = ? WHERE seq = ?", ("{not json", torn_seq))
         conn.commit()
         conn.close()
-        reader = open_channel(run_id, root=tmp_path, backend="sqlite")
+        reader = create_channel(run_id, root=tmp_path, backend="sqlite")
         opened.append(reader)
         return reader
 

@@ -33,7 +33,7 @@ import asyncio
 import json
 
 from rich.text import Text
-from runstate import open_channel
+from runstate import create_channel
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Static
@@ -53,7 +53,7 @@ def _sqlite_run(tmp_path, run_id, records):
     sqlite-backed run and return its RunRef `(run_id, root, "sqlite")` -- a real file
     is needed here (not `build_log`'s in-memory channel) so later steps can reopen a
     writer, `corrupt_seq`, or hold a live connection across the test."""
-    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     for record in records:
         body, topic, name, *rest = record
         writer.send(body, topic=topic, name=name, request_id=rest[0] if rest else None)
@@ -64,7 +64,7 @@ def _sqlite_run(tmp_path, run_id, records):
 def _append(tmp_path, run_id, body, topic, **kw):
     """Open-send-close on the same sqlite run log -- a closed-writer append between
     ticks (distinct from `sqlite_wal_held_writer`'s live-held-writer path below)."""
-    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
     try:
         return ch.send(body, topic=topic, **kw)
     finally:

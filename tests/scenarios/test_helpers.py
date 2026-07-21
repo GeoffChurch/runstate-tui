@@ -86,30 +86,30 @@ async def _log_text_extracts_strip_text():
 
 
 def test_corrupt_seq_plants_torn_and_alien(tmp_path, build_log):
-    from runstate import open_channel
+    from runstate import create_channel
 
     from tests.helpers import corrupt_seq
 
-    w = open_channel("r", root=tmp_path, backend="sqlite")
+    w = create_channel("r", root=tmp_path, backend="sqlite")
     w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
     w.close()
     corrupt_seq(tmp_path, "r", 1, literal="42")
-    r = open_channel("r", root=tmp_path, backend="sqlite")
+    r = create_channel("r", root=tmp_path, backend="sqlite")
     got = r.read(after=0)
     assert got[0].body == 42  # alien body decoded as a bare int
     r.close()
 
 
 def test_corrupt_seq_plants_byte_torn_body(tmp_path):
-    from runstate import open_channel
+    from runstate import create_channel
 
     from tests.helpers import corrupt_seq
 
-    w = open_channel("torn", root=tmp_path, backend="sqlite")
+    w = create_channel("torn", root=tmp_path, backend="sqlite")
     w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
     w.close()
     corrupt_seq(tmp_path, "torn", 1)  # default literal="{not json"
-    r = open_channel("torn", root=tmp_path, backend="sqlite")
+    r = create_channel("torn", root=tmp_path, backend="sqlite")
     with pytest.raises(json.JSONDecodeError):
         r.latest("lifecycle.started")
     r.close()
@@ -129,12 +129,12 @@ def test_foreign_db_is_valid_sqlite_with_alien_schema(foreign_db):
 
 
 def test_held_writer_sqlite_run_stays_open_and_appends_live(held_writer_sqlite_run):
-    from runstate import open_channel
+    from runstate import create_channel
 
     ref, send = held_writer_sqlite_run
     send({"handle": "h", "t": 1.0}, "lifecycle.started")
     run_id, root, backend = ref
-    reader = open_channel(run_id, root=root, backend=backend)
+    reader = create_channel(run_id, root=root, backend=backend)
     try:
         assert reader.latest("lifecycle.started") is not None
     finally:
@@ -150,7 +150,7 @@ def test_advance_tick_runs_a_manual_tick_and_the_table_reads_it(tmp_path):
 
 
 async def _advance_tick_and_table(tmp_path):
-    from runstate import open_channel
+    from runstate import create_channel
     from textual.app import App, ComposeResult
     from textual.coordinate import Coordinate
     from textual.widgets import DataTable
@@ -160,7 +160,7 @@ async def _advance_tick_and_table(tmp_path):
     from runstate_tui.env import Env
     from tests.helpers import advance_tick
 
-    ch = open_channel("adv", root=tmp_path, backend="sqlite")
+    ch = create_channel("adv", root=tmp_path, backend="sqlite")
     ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
     ch.close()
     ref = ("adv", str(tmp_path), "sqlite")

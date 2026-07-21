@@ -3,7 +3,7 @@ import threading
 import time
 
 from rich.text import Text
-from runstate import open_channel
+from runstate import create_channel
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Input, Static
@@ -21,7 +21,7 @@ def _seed_rich(tmp_path):
     `scene_drilldown` seed, but SQLITE-backed (not memory): DrillDownScreen and
     read_log_delta take a RunRef and read from disk, not an already-open channel."""
     run_id = "rich"
-    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
     writer.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
     writer.send({"value": 0.03, "step": 7, "t": 140.0}, topic="value", name="loss")
@@ -222,7 +222,7 @@ def test_live_tail_appends_at_top_incrementally(tmp_path):
 
 async def _live_tail(tmp_path):
     ref = ("live", str(tmp_path), "sqlite")
-    w = open_channel("live", root=tmp_path, backend="sqlite")
+    w = create_channel("live", root=tmp_path, backend="sqlite")
     w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
     app = _HostApp(ref, tick_interval=999.0)
     async with app.run_test(size=(90, 22)) as pilot:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-RunRef = tuple[str, str, str]  # (run_id, root, backend) — open_channel's three inputs
+RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
 Resolver = Callable[[float], list[RunRef]]  # Time -> IndexSet (re-resolved each frame)
 
 
@@ -20,9 +20,10 @@ def ref_from_path(path: str) -> RunRef:
 
 
 def explicit_resolver(refs: list[RunRef]) -> Resolver:
-    """A fixed IndexSet — the safe (no create=False) multi-run resolver. Exact
-    duplicate refs are dropped (order preserved) so each run is one pooled channel
-    and one DataTable row."""
+    """A fixed IndexSet — the safe multi-run resolver: the refs it yields are opened
+    via `attach_channel`, which never creates, so resolving a stale/foreign pointer
+    can't fabricate or mutate a run. Exact duplicate refs are dropped (order preserved)
+    so each run is one pooled channel and one DataTable row."""
     snapshot = list(dict.fromkeys(refs))
 
     def resolve(_now: float) -> list[RunRef]:

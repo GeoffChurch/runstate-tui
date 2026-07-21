@@ -2,7 +2,7 @@ import json
 import sqlite3
 
 import pytest
-from runstate import open_channel
+from runstate import create_channel
 from runstate.observables import Outcome, peek_terminal, progress
 
 from runstate_tui import status_fold
@@ -59,14 +59,14 @@ def test_guarded_degrades_an_alien_non_dict_body_to_a_malformed_issue(tmp_path):
     # decodable-but-wrong-shape MALFORMED class as MalformedRecordError, NOT the
     # byte-torn `corrupt` class (undecodable JSON, still propagates uncaught).
     run_id = "alien"
-    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     writer.send({"step": 5, "consumed_seq": 0, "t": 1.0}, topic="lifecycle.heartbeat")
     writer.close()
     conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))
     conn.execute("UPDATE log SET body = ? WHERE seq = ?", ("42", 1))
     conn.commit()
     conn.close()
-    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
     try:
         value, issue = guarded(progress, ch)
         assert value is None
@@ -89,7 +89,7 @@ def test_open_and_fold_degrades_an_alien_started_body_to_malformed_not_crash(tmp
     from runstate_tui import open_and_fold
 
     run_id = "alien-started"
-    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
     writer.close()
     conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))

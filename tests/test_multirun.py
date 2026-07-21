@@ -3,7 +3,7 @@ import threading
 import time
 
 from rich.text import Span
-from runstate import open_channel
+from runstate import create_channel
 from textual.widgets import DataTable, Static
 
 import runstate_tui.multirun as multirun_mod
@@ -15,7 +15,7 @@ from runstate_tui.resolver import explicit_resolver, ref_key
 
 
 def _seed(tmp_path, run_id, t=100.0):
-    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
     ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
     ch.close()
     return (run_id, str(tmp_path), "sqlite")
@@ -47,7 +47,7 @@ async def _row_updates_and_preserves_cursor(tmp_path):
         await pilot.pause()
         t = app.query_one("#runs", DataTable)
         before = t.cursor_coordinate
-        w = open_channel("a", root=ref[1], backend="sqlite")
+        w = create_channel("a", root=ref[1], backend="sqlite")
         w.send({"step": 5, "consumed_seq": 0, "t": 150.0}, topic="lifecycle.heartbeat")
         w.close()
         app._tick()
