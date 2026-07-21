@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable
-from pathlib import Path
 
-from runstate import open_channel
+from runstate import RunNotFound, attach_channel
 from runstate.channel import Channel, Envelope
 
 from .env import Env
@@ -95,21 +94,18 @@ def fold_open_channel(channel: Channel, env: Env) -> Row:
 
 def open_and_fold(ref: RunRef, env: Env) -> Row:
     run_id, root, backend = ref
-    # stat-before-open (sqlite): a missing pointer must NOT open_channel (that would
-    # fabricate a phantom <run_id>.db into a content-addressed store) — spec §4/§11.
-    # stat() (not Path.exists(), which swallows EACCES into a wrong `missing`) so an
-    # unreadable parent dir (PermissionError) is distinguished from a missing pointer.
-    if backend == "sqlite":
-        try:
-            (Path(root) / f"{run_id}.db").stat()
-        except FileNotFoundError:
-            return _bare(Status.missing())
-        except OSError:
-            return _bare(Status.unreadable())
+    # attach_channel (never create_channel): observing a run must NOT fabricate a
+    # phantom <run_id>.db, and must NOT schema-mutate a foreign valid sqlite db under a
+    # stale pointer — both, plus a genuinely-empty run, are `RunNotFound` -> `missing`
+    # (a run exists iff it has records; spec channel-locators.md). Only corrupt/non-sqlite
+    # bytes still raise `sqlite3.DatabaseError` -> `unreadable`. This is strictly SAFER
+    # than the old stat-before-open, which could not catch the foreign-db mutation.
     try:
-        channel = open_channel(run_id, root=root, backend=backend)
+        channel = attach_channel(run_id, root=root, backend=backend)
+    except RunNotFound:
+        return _bare(Status.missing())
     except _OPEN_ERRORS:
-        return _bare(Status.unreadable())  # corrupt/foreign/unopenable db
+        return _bare(Status.unreadable())  # corrupt/non-sqlite/unopenable db
     try:
         return fold_open_channel(channel, env)
     finally:
@@ -128,14 +124,12 @@ def read_log_delta(
     the run's status, including the loud `corrupt` verdict, via render_single/
     open_and_fold)."""
     run_id, root, backend = ref
-    if backend == "sqlite":
-        try:
-            (Path(root) / f"{run_id}.db").stat()
-        except OSError:
-            return []  # missing pointer / unreadable dir — never fabricate a phantom db
+    # attach_channel (never create_channel): never fabricate a phantom db nor mutate a
+    # foreign one. A run with no records (missing/empty/foreign) raises `RunNotFound`;
+    # corrupt/non-sqlite raises a `_OPEN_ERRORS` member — both degrade the tail to [].
     try:
-        channel = open_channel(run_id, root=root, backend=backend)
-    except _OPEN_ERRORS:
+        channel = attach_channel(run_id, root=root, backend=backend)
+    except (RunNotFound, *_OPEN_ERRORS):
         return []
     try:
         got = channel.read(after=after, limit=limit)

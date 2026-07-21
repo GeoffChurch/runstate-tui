@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from runstate import open_channel
+from runstate import create_channel
 from textual.app import App
 
 from runstate_tui.app import SingleRunApp
@@ -28,7 +28,7 @@ def _corrupt(root: Path, run_id: str, seq: int, literal: str) -> None:
 
 
 def _ch(root: Path, rid: str):
-    return open_channel(rid, root=root, backend="sqlite")
+    return create_channel(rid, root=root, backend="sqlite")
 
 
 async def capture(
@@ -144,12 +144,12 @@ async def scene_integrity(out_dir: Path) -> Path:
     c.close()
     _corrupt(root, "train-gpt2", 2, "{not json")
 
-    # not a sqlite database at all -- open_channel raises sqlite3.DatabaseError, caught
-    # by open_and_fold's _OPEN_ERRORS -> unreadable (red dot, no marker). NOT a foreign
-    # *valid* sqlite schema: that's a distinct, already-documented gap (see
-    # tests/scenarios/test_fold_plane.py::test_foreign_valid_db_reads_pending) where
-    # open_channel's `CREATE TABLE IF NOT EXISTS log` silently adopts the file and it
-    # reads back as an ordinary empty `pending` run instead.
+    # not a sqlite database at all -- attach_channel's records probe raises
+    # sqlite3.DatabaseError, caught by open_and_fold's _OPEN_ERRORS -> unreadable (red
+    # dot, no marker). Distinct from a foreign *valid* sqlite db, which attach_channel
+    # now safely reads as `missing` (no `log` table -> RunNotFound) leaving it
+    # byte-identical -- the old mutate-on-open gap is fixed (pinned in
+    # tests/scenarios/test_fold_plane.py, the foreign-valid-db test).
     (root / "eval-glue.db").write_bytes(b"this is not a sqlite database")  # -> unreadable (red dot)
 
     # "finetune-t5": its .db is never created -> missing: grey dot, no marker.

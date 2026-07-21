@@ -4,7 +4,7 @@ from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 
-from runstate import open_channel
+from runstate import RunNotFound, attach_channel
 from runstate.channel import Channel
 
 from .env import Env
@@ -47,9 +47,30 @@ class ChannelPool:
 
     def row_for(self, ref: RunRef, frame_env: Env) -> Row:
         run_id, root, backend = ref
-        # stat-before-open EVERY tick (never fabricate a phantom db; catch a run whose
-        # file vanished mid-session -> honest `missing`, matching open_and_fold).
-        if backend == "sqlite":
+        ch = self._open.get(ref)
+        if ch is None:
+            # cold open via attach_channel: never fabricate a phantom db nor mutate a
+            # foreign one. A run with no records (missing/empty/foreign valid db) raises
+            # `RunNotFound` -> honest `missing`; corrupt/non-sqlite raises `_OPEN_ERRORS`
+            # -> `unreadable` (not cached, retried next tick). attach_channel makes the
+            # old cold-path stat redundant AND safer (it catches the foreign-db case).
+            try:
+                ch = attach_channel(run_id, root=root, backend=backend)
+            except RunNotFound:
+                return _bare(Status.missing())
+            except _OPEN_ERRORS:
+                return _bare(Status.unreadable())
+            if len(self._open) >= self._cap:
+                self._evict_oldest()
+            self._open[ref] = ch
+        elif backend == "sqlite":
+            # A CACHED sqlite handle keeps reading off its still-open inode even after the
+            # .db is unlinked out from under a live cockpit (WAL: the fd persists), so the
+            # fold would silently serve a phantom read that never self-heals. attach_channel
+            # cannot re-check an already-open handle — a per-tick stat is the ONLY detector
+            # for the vanished-cached-file case. Missing -> evict + honest `missing`; an
+            # unreadable dir -> evict + `unreadable`. (Cold opens above skip this: attach
+            # already covers them.)
             try:
                 (Path(root) / f"{run_id}.db").stat()
             except FileNotFoundError:
@@ -58,15 +79,6 @@ class ChannelPool:
             except OSError:
                 self._evict(ref)
                 return _bare(Status.unreadable())
-        ch = self._open.get(ref)
-        if ch is None:
-            try:
-                ch = open_channel(run_id, root=root, backend=backend)
-            except _OPEN_ERRORS:
-                return _bare(Status.unreadable())  # not cached — retried next tick
-            if len(self._open) >= self._cap:
-                self._evict_oldest()
-            self._open[ref] = ch
         self._open.move_to_end(ref)  # LRU: most-recently-used last
         row = fold_open_channel(ch, frame_env)
         if row.status.kind in _EVICT_KINDS:

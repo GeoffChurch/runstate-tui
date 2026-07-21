@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
-from runstate import open_channel
+from runstate import create_channel
 from runstate.vocabulary.payloads import Heartbeat, Nak, Started, Stopped, Topic
 
 from runstate_tui.control import StopOutcome, StopResult, dispatch_stop, stop_run
@@ -14,7 +14,7 @@ from tests.helpers import corrupt_seq
 
 
 def _run(tmp_path: Path, run_id: str):
-    return open_channel(run_id, root=str(tmp_path), backend="sqlite")
+    return create_channel(run_id, root=str(tmp_path), backend="sqlite")
 
 
 def test_stop_run_accepted_when_a_heartbeat_watermark_covers_the_stop(tmp_path):
@@ -170,9 +170,10 @@ def test_dispatch_stop_missing_run_is_undelivered_and_fabricates_no_db(tmp_path)
 
 
 def test_dispatch_stop_opens_sends_and_reports_unsafe_when_unserved(tmp_path):
-    # a real, existing (empty) run with no worker: dispatch opens it, sends the
-    # stop, and the bounded handshake times out -> UNSAFE (proves open+send+close
-    # wiring end-to-end). Seed the db so stat-before-open passes.
+    # a real, existing run with no worker: dispatch attaches it, sends the stop, and
+    # the bounded handshake times out -> UNSAFE (proves attach+send+close wiring
+    # end-to-end). Seed one record so the run HAS records -> attach_channel finds it
+    # (a run exists iff it has records; an empty run would attach as RunNotFound).
     seed = _run(tmp_path, "live")
     seed.send(asdict(Started(handle="h", t=1.0)), topic=Topic.LIFECYCLE_STARTED)
     seed.close()
@@ -185,20 +186,27 @@ def test_dispatch_stop_opens_sends_and_reports_unsafe_when_unserved(tmp_path):
 
 
 def test_dispatch_stop_unopenable_run_is_undelivered(tmp_path):
-    # a real file that is NOT a valid sqlite db: stat passes, open_channel raises
+    # a real file that IS present but is NOT a valid sqlite db (non-sqlite bytes):
+    # attach_channel's connect succeeds, then the records probe raises
+    # sqlite3.DatabaseError ("file is not a database") -- NOT a RunNotFound miss --
+    # which dispatch_stop's `except _OPEN_ERRORS` maps to UNDELIVERED (unopenable).
     (tmp_path / "garbage.db").write_bytes(b"not a sqlite database\x00\x01")
     outcome = dispatch_stop(("garbage", str(tmp_path), "sqlite"), request_id="webui:g", timeout=1.0)
     assert outcome.result is StopResult.UNDELIVERED
     assert outcome.detail == "run could not be opened"
 
 
-def test_dispatch_stop_unreadable_run_is_undelivered(tmp_path):
-    # root points at a regular file, so stat(<file>/run.db) raises NotADirectoryError (OSError)
+def test_dispatch_stop_not_a_dir_root_is_undelivered_missing(tmp_path):
+    # root points at a regular file: attach_channel's `mode=rw` connect on
+    # <file>/run.db can't open (the parent isn't a directory) and raises
+    # sqlite3.OperationalError, which attach_channel maps to RunNotFound (same class
+    # as an absent file) -> dispatch_stop's `except RunNotFound` -> UNDELIVERED
+    # (missing). The old stat-branch "run is unreadable" detail is gone with the stat.
     not_a_dir = tmp_path / "not_a_dir"
     not_a_dir.write_text("x")
     outcome = dispatch_stop(("run", str(not_a_dir), "sqlite"), request_id="webui:n", timeout=1.0)
     assert outcome.result is StopResult.UNDELIVERED
-    assert outcome.detail == "run is unreadable"
+    assert outcome.detail == "no such run (missing)"
     assert not (not_a_dir / "run.db").exists()  # never fabricated
 
 

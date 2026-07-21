@@ -2,7 +2,7 @@ import asyncio
 import threading
 import time
 
-from runstate import open_channel
+from runstate import create_channel
 from textual.widgets import Static
 
 from runstate_tui.app import SingleRunApp
@@ -13,7 +13,7 @@ from runstate_tui.env import Env
 
 
 def _live_sqlite_run(tmp_path):
-    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch = create_channel("r", root=tmp_path, backend="sqlite")
     ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
     ch.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
     ch.close()
@@ -53,7 +53,7 @@ async def _reschedules(tmp_path):
 def test_byte_torn_renders_corrupt_not_crash(tmp_path):
     import sqlite3
 
-    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch = create_channel("r", root=tmp_path, backend="sqlite")
     ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
     ch.close()
     conn = sqlite3.connect(str(tmp_path / "r.db"))
@@ -75,7 +75,7 @@ async def _shows_corrupt(ref):
 def test_alien_started_renders_malformed_not_crash(tmp_path):
     import sqlite3
 
-    ch = open_channel("r", root=tmp_path, backend="sqlite")
+    ch = create_channel("r", root=tmp_path, backend="sqlite")
     ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
     ch.close()
     conn = sqlite3.connect(str(tmp_path / "r.db"))

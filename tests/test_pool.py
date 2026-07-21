@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from runstate import open_channel
+from runstate import create_channel
 
 from runstate_tui.env import Env
 from runstate_tui.pool import ChannelPool, fold_frame
@@ -12,7 +12,7 @@ from tests.helpers import corrupt_seq
 
 
 def _seed(tmp_path, run_id, t=100.0):
-    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
     ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
     ch.close()
     return (run_id, str(tmp_path), "sqlite")
@@ -96,12 +96,13 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
 
 
 def test_row_for_evicts_a_pooled_run_whose_db_file_vanishes(tmp_path):
-    # Coverage gap (final review): the pool's OWN missing/unreadable self-heal path
-    # (row_for's stat-before-open, run every tick, evict-on-FileNotFoundError) was never
-    # exercised once a channel was already pooled. A run's .db can vanish mid-session
-    # (deleted out from under a live cockpit) after the pool cached its channel; the NEXT
-    # fold's stat must catch this, evict the now-dangling handle, and render a loud
-    # `missing` row -- not serve a phantom read off a channel whose backing file is gone.
+    # The pool's cached-handle self-heal path: a cached sqlite handle keeps reading its
+    # already-open (now-deleted) inode via the WAL fd, so the fold can't detect the loss --
+    # hence row_for retains a stat for CACHED handles only (attach_channel guards the
+    # cold-open). A run's .db can vanish mid-session (deleted out from under a live cockpit)
+    # after the pool cached its channel; the NEXT fold's cached-handle stat must catch this,
+    # evict the now-dangling handle, and render a loud `missing` row -- not serve a phantom
+    # read off a channel whose backing file is gone.
     ref = _seed(tmp_path, "a")
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=8)

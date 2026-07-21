@@ -8,7 +8,7 @@ same as `test_detail.py`'s `Host()` case, no extra wrapping needed."""
 
 from __future__ import annotations
 
-from runstate import open_channel
+from runstate import create_channel
 from textual.widgets import DataTable
 
 from runstate_tui.env import Env
@@ -17,7 +17,7 @@ from runstate_tui.resolver import explicit_resolver
 
 
 def _seed(tmp_path, run_id, t=100.0):
-    ch = open_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
     ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
     ch.close()
     return (run_id, str(tmp_path), "sqlite")

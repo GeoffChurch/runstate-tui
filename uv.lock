@@ -800,7 +800,7 @@ wheels = [
 [[package]]
 name = "runstate"
 version = "0.2.0.dev0"
-source = { git = "https://github.com/GeoffChurch/runstate?branch=master#f5599c34daa02448d7750935b948761e2d47a453" }
+source = { git = "https://github.com/GeoffChurch/runstate?branch=master#ba26e50faa5b1a36bfa9e71d1bda5977401201bb" }
 
 [[package]]
 name = "runstate-tui"

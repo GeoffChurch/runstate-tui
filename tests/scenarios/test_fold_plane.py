@@ -14,11 +14,12 @@ incidental MALFORMED issue unrelated to what a given scenario is pinning."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 
 import pytest
-from runstate import open_channel
+from runstate import create_channel
 from runstate.observables import Outcome
 
 from runstate_tui import open_and_fold, status_fold
@@ -37,7 +38,7 @@ def _sqlite_run(tmp_path, run_id, records):
     fresh sqlite-backed run and return its RunRef `(run_id, root, "sqlite")` --
     the integrity scenarios below need a real file to tear with `corrupt_seq`
     or overlay with `foreign_db`, unlike `build_log`'s in-memory channel."""
-    writer = open_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     for record in records:
         body, topic, name, *rest = record
         writer.send(body, topic=topic, name=name, request_id=rest[0] if rest else None)
@@ -228,7 +229,7 @@ def test_corrupt_value_wrong_name_invisible(tmp_path):
     )
     corrupt_seq(tmp_path, "cwrong", 3)
     run_id, root, backend = ref
-    ch = open_channel(run_id, root=root, backend=backend)
+    ch = create_channel(run_id, root=root, backend=backend)
     try:
         row = status_fold(ch, _env(10.0, objective="loss"))
     finally:
@@ -284,25 +285,36 @@ def test_alien_started_body_malformed(tmp_path):
     assert row.frontier is None and row.elapsed is None and row.episode is None
 
 
-def test_foreign_valid_db_reads_pending(foreign_db):
-    # FINDING: §8 foreign-db gap -- a VALID sqlite file with an alien (non-runstate)
-    # schema is not detected as foreign at all: open_channel's `CREATE TABLE IF NOT
-    # EXISTS log` silently adds the runstate schema to someone else's database, and
-    # the fold then reads that fresh, empty `log` table as an ordinary bare PENDING
-    # run -- indistinguishable from a never-started one. The open MUTATES the file.
-    row = open_and_fold(foreign_db, _env(150.0))
-    assert row.status.kind is StatusKind.PENDING
-    assert row.issues == ()
+def test_foreign_valid_db_reads_missing_and_is_left_byte_identical(foreign_db):
+    # THE PAYOFF (spec channel-locators.md; the PR #14 harm, now pinned FIXED): a VALID
+    # sqlite file with an alien (non-runstate) schema reached through a stale pointer is
+    # no longer schema-mutated. attach_channel opens `mode=rw` and only PROBES for a
+    # `log` table; "no such table: log" is RunNotFound -> `missing`, and NOTHING is
+    # written. The old §8 gap ran `CREATE TABLE IF NOT EXISTS log`, silently adding the
+    # runstate schema to someone else's db and misrendering it as a bare PENDING run.
     run_id, root, _backend = foreign_db
-    conn = sqlite3.connect(str(root) + f"/{run_id}.db")
+    dbfile = f"{root}/{run_id}.db"
+    with open(dbfile, "rb") as f:
+        before = f.read()
+
+    row = open_and_fold(foreign_db, _env(150.0))
+    assert row.status.kind is StatusKind.MISSING  # no `log` table -> RunNotFound
+    assert row.issues == ()
+
+    with open(dbfile, "rb") as f:
+        after = f.read()
+    assert after == before  # byte-identical -- attach mutated nothing (the fix)
+    assert not os.path.exists(dbfile + "-wal")  # no WAL side-file was created either
+
+    conn = sqlite3.connect(dbfile)
     try:
         tables = {
             name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     finally:
         conn.close()
-    assert "log" in tables  # the file now carries a runstate schema it never had
-    assert "unrelated" in tables  # the alien table is untouched, not replaced
+    assert "log" not in tables  # the runstate schema was NOT added (the mutation is gone)
+    assert "unrelated" in tables  # the alien table is untouched
 
 
 def test_malformed_value_silently_tolerated(build_log):

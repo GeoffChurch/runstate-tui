@@ -5,9 +5,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 
-from runstate import RunResult, await_consumed, open_channel
+from runstate import RunNotFound, RunResult, attach_channel, await_consumed
 from runstate.channel import Channel
 from runstate.observables import MalformedRecordError, peek_terminal
 from runstate.vocabulary.payloads import Nak, Topic
@@ -133,19 +132,18 @@ def dispatch_stop(
 ) -> StopOutcome:
     """Open the run by ref, run the handshake, close the channel after.
 
-    stat-before-open (sqlite): a missing pointer must NOT open_channel — that
-    would fabricate a phantom `<run_id>.db` AND write a `control.stop` into a
-    file we do not own (spec §8). Missing/unreadable/unopenable ⇒ UNDELIVERED."""
+    attach_channel (never create_channel): controlling a run must NOT fabricate a
+    phantom `<run_id>.db`, and must NOT schema-mutate a foreign valid sqlite db
+    reached through a stale pointer (spec §8) — both, plus a genuinely-empty run,
+    are `RunNotFound` now, reported UNDELIVERED (missing) without any write. A
+    corrupt/non-sqlite db still raises `sqlite3.DatabaseError` (`_OPEN_ERRORS`) ⇒
+    UNDELIVERED (unopenable). attach_channel is writable, so the stop still sends
+    into a real run."""
     run_id, root, backend = ref
-    if backend == "sqlite":
-        try:
-            (Path(root) / f"{run_id}.db").stat()
-        except FileNotFoundError:
-            return StopOutcome(StopResult.UNDELIVERED, request_id, "no such run (missing)")
-        except OSError:
-            return StopOutcome(StopResult.UNDELIVERED, request_id, "run is unreadable")
     try:
-        channel = open_channel(run_id, root=root, backend=backend)
+        channel = attach_channel(run_id, root=root, backend=backend)
+    except RunNotFound:
+        return StopOutcome(StopResult.UNDELIVERED, request_id, "no such run (missing)")
     except _OPEN_ERRORS:
         return StopOutcome(StopResult.UNDELIVERED, request_id, "run could not be opened")
     try:
