@@ -86,3 +86,46 @@ def test_glob_resolver_is_symlink_cycle_safe(tmp_path):
     # pathlib.rglob does not recurse into symlinked directories.
     refs = glob_resolver(str(tmp_path))(0.0)
     assert sorted(r[0] for r in refs) == ["a", "b"]
+
+
+def test_disambiguate_is_a_noop_when_stems_are_unique():
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    refs = [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
+    labels = disambiguate(refs)
+    assert labels[ref_key(refs[0])] == "a"
+    assert labels[ref_key(refs[1])] == "b"
+
+
+def test_disambiguate_grows_only_the_colliding_group():
+    # 99 unique stems + one colliding pair: ONLY the pair grows a parent level; the rest
+    # stay bare (ragged-minimal, not uniform-depth).
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    refs = [(f"run{i:03d}", "/runs/g1", "sqlite") for i in range(1, 100)]
+    refs += [("run000", "/runs/g1", "sqlite"), ("run000", "/runs/g2", "sqlite")]
+    labels = disambiguate(refs)
+    assert labels[ref_key(("run050", "/runs/g1", "sqlite"))] == "run050"  # untouched
+    assert labels[ref_key(("run000", "/runs/g1", "sqlite"))] == "g1/run000"
+    assert labels[ref_key(("run000", "/runs/g2", "sqlite"))] == "g2/run000"
+
+
+def test_disambiguate_backtracks_deeper_when_the_parent_also_collides():
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    a = ("trial", "/runs/a/g", "sqlite")
+    b = ("trial", "/runs/b/g", "sqlite")  # same stem AND same parent dir name "g"
+    labels = disambiguate([a, b])
+    assert labels[ref_key(a)] == "a/g/trial"
+    assert labels[ref_key(b)] == "b/g/trial"
+
+
+def test_disambiguate_terminates_on_suffix_overlap():
+    # One run's full path is a suffix of the other's -> the shorter maxes out while the
+    # longer keeps growing; must terminate and disambiguate, not loop forever.
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    short = ("trial", "/x", "sqlite")  # parts end (..., "x", "trial")
+    long_ = ("trial", "/y/x", "sqlite")  # parts end (..., "y", "x", "trial")
+    labels = disambiguate([short, long_])
+    assert labels[ref_key(short)] != labels[ref_key(long_)]

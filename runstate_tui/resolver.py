@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
@@ -47,6 +47,37 @@ def glob_resolver(root: str) -> Resolver:
         return list(dict.fromkeys(refs))  # dedup, order preserved
 
     return resolve
+
+
+def disambiguate(refs: Sequence[RunRef]) -> dict[str, str]:
+    """Map each ref (by ``ref_key``) to the SHORTEST trailing path suffix that is unique
+    across `refs`. Start every run at its bare stem; any group that still collides grows
+    one more parent level; repeat until no group collides. Ragged-minimal -- a lone
+    collision never lengthens the labels of already-unique runs. A NO-OP when every stem
+    is unique (each label is the bare stem), so applying it globally never changes a table
+    whose stems don't collide. Distinct refs have distinct part-tuples and `grew` only
+    flips when a depth actually increases, so the loop always terminates (worst case: the
+    full path)."""
+    parts: dict[str, tuple[str, ...]] = {ref_key(r): Path(r[1], r[0]).parts for r in refs}
+    depth: dict[str, int] = {k: 1 for k in parts}
+
+    def label(k: str) -> str:
+        return "/".join(parts[k][-depth[k] :])
+
+    while True:
+        groups: dict[str, list[str]] = {}
+        for k in parts:
+            groups.setdefault(label(k), []).append(k)
+        grew = False
+        for members in groups.values():
+            if len(members) > 1:
+                for k in members:
+                    if depth[k] < len(parts[k]):
+                        depth[k] += 1
+                        grew = True
+        if not grew:
+            break
+    return {k: label(k) for k in parts}
 
 
 def ref_key(ref: RunRef) -> str:
