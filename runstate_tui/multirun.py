@@ -11,7 +11,7 @@ from textual.widgets import DataTable, Static
 
 from .detail import _TEARDOWN_ERRORS, DrillDownScreen
 from .env import Env
-from .format import status_color
+from .format import format_fleet_summary, status_color
 from .pool import ChannelPool, Table, fold_frame
 from .resolver import Resolver, RunRef, disambiguate, ref_key
 from .types import Row, Severity
@@ -112,6 +112,7 @@ class MultiRunApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="stall")  # the watchdog banner (hidden via display, see on_mount)
+        yield Static("", id="summary")  # the always-on fleet legend / roll-up strip
         yield Static("", id="empty")  # the zero-match placeholder (glob mode; toggled in reconcile)
         yield DataTable(id="runs")
 
@@ -216,12 +217,19 @@ class MultiRunApp(App[None]):
                 # sort() doesn't track the selected row key; restore it explicitly.
                 t.move_cursor(row=t.get_row_index(sel))
         empty = self.query_one("#empty", Static)
+        summary = self.query_one("#summary", Static)
         if self._empty_hint is not None and not want:
             empty.display = True
             t.display = False
+            summary.display = False
         else:
             empty.display = False
             t.display = True
+            if want:
+                summary.update(format_fleet_summary([row for _, row in msg.table]))
+                summary.display = True
+            else:
+                summary.display = False
 
     def _is_stalled(self) -> bool:
         if self._last_ready is None:

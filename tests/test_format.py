@@ -199,3 +199,86 @@ def test_summary_card_is_two_compact_lines_with_counts():
     assert "episode local://h/1" in plain  # line 2: episode
     assert "1 stop pending" in plain and "1 demand" in plain  # line 2: COUNTS, not lists
     assert plain.count("\n") == 1  # exactly two lines
+
+
+def test_fleet_summary_orders_worst_first_and_counts():
+    from runstate_tui.format import format_fleet_summary
+
+    rows = (
+        [_row(status=Status.unreadable()) for _ in range(30)]
+        + [
+            _row(
+                status=Status.corrupt(),
+                issues=(Issue(IssueKind.CORRUPT, Severity.HIGH, "log corrupt", seq=1),),
+            )
+            for _ in range(2)
+        ]
+        + [_row(status=Status.live(), issues=(Issue(IssueKind.MALFORMED, Severity.MEDIUM, "bad"),))]
+        + [_row(status=Status.live()) for _ in range(93)]
+        + [_row(status=Status.terminal(Outcome.COMPLETED)) for _ in range(3)]
+    )
+    plain = format_fleet_summary(rows).plain
+    assert "unreadable 30" in plain
+    assert "corrupt 2" in plain
+    assert "malformed 1" in plain
+    assert "live 94" in plain  # 93 pure-live + the 1 live-with-malformed
+    assert "done 3" in plain
+    # worst-first: HIGH (corrupt < unreadable) before MEDIUM (malformed) before OK (done < live)
+    i = plain.index
+    assert i("corrupt") < i("unreadable") < i("malformed") < i("done") < i("live")
+
+
+def test_fleet_summary_corrupt_counts_once_as_status_not_issue():
+    from runstate_tui.format import format_fleet_summary
+
+    torn = Issue(IssueKind.CORRUPT, Severity.HIGH, "log corrupt at seq 5", seq=5)
+    plain = format_fleet_summary(
+        [_row(status=Status.corrupt(), issues=(torn,)) for _ in range(2)]
+    ).plain
+    assert "corrupt 2" in plain
+    assert plain.count("corrupt") == 1  # ONLY the status chip -- the CORRUPT issue-twin is skipped
+    assert "⚠" not in plain  # no issue chip at all
+
+
+def test_fleet_summary_malformed_shows_under_status_and_as_a_tag():
+    from runstate_tui.format import format_fleet_summary
+
+    m = Issue(IssueKind.MALFORMED, Severity.MEDIUM, "bad record")
+    plain = format_fleet_summary([_row(status=Status.live(), issues=(m,))]).plain
+    assert "live 1" in plain  # counted under its status...
+    assert "malformed 1" in plain  # ...AND tagged -- two genuinely-different facts
+
+
+def test_fleet_summary_issue_name_is_kind_value_verbatim():
+    from runstate_tui.format import format_fleet_summary
+
+    s = Issue(IssueKind.SKEW_SUSPECTED, Severity.MEDIUM, "clock skew")
+    assert (
+        "skew_suspected 1" in format_fleet_summary([_row(status=Status.live(), issues=(s,))]).plain
+    )
+
+
+def test_fleet_summary_empty_is_empty_text():
+    from runstate_tui.format import format_fleet_summary
+
+    assert format_fleet_summary([]).plain == ""
+
+
+def test_fleet_summary_colors_the_glyph_only_not_the_label():
+    from runstate_tui.format import format_fleet_summary, status_color
+
+    text = format_fleet_summary([_row(status=Status.live())])
+    green = [s for s in text.spans if s.style == status_color(Status.live())]
+    assert green  # the ● glyph is colored
+    assert all(s.end <= len("● ") for s in green)  # color covers only the glyph, not the label
+    assert any(s.style == "default" for s in text.spans)  # the label text is neutral
+
+
+def test_fleet_summary_order_is_stable_regardless_of_counts():
+    from runstate_tui.format import format_fleet_summary
+
+    few = [_row(status=Status.unreadable())] + [_row(status=Status.live()) for _ in range(2)]
+    many = [_row(status=Status.unreadable()) for _ in range(50)] + [_row(status=Status.live())]
+    for rows in (few, many):
+        plain = format_fleet_summary(rows).plain
+        assert plain.index("unreadable") < plain.index("live")  # severity order, never count

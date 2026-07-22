@@ -588,3 +588,46 @@ async def _enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
         assert isinstance(app.screen, DrillDownScreen)  # opened despite a fresh resolve -> []
         assert app.screen._ref == a
         assert calls["n"] == calls_before_enter  # action_detail did NOT re-resolve
+
+
+def test_summary_strip_shows_fleet_rollup(tmp_path):
+    asyncio.run(_summary_strip_shows_fleet_rollup(tmp_path))
+
+
+async def _summary_strip_shows_fleet_rollup(tmp_path):
+    a = _seed(tmp_path, "a")
+    b = _seed(tmp_path, "b")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        summary = app.query_one("#summary", Static)
+        assert summary.display
+        assert "live 2" in str(summary.content)  # both seeded runs are live -> one chip, count 2
+
+
+def test_summary_hidden_when_no_runs_then_swaps_in(tmp_path):
+    asyncio.run(_summary_hidden_when_no_runs_then_swaps_in(tmp_path))
+
+
+async def _summary_hidden_when_no_runs_then_swaps_in(tmp_path):
+    # a glob-empty frame: #empty owns the screen, #summary is hidden; a run appearing swaps.
+    live = {"refs": []}
+    app = MultiRunApp(
+        lambda now: list(live["refs"]),
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        empty_hint="watching /runs/**/*.db — no runs yet",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        summary = app.query_one("#summary", Static)
+        assert not summary.display  # 0 runs -> hidden
+        assert app.query_one("#empty", Static).display
+        live["refs"] = [_seed(tmp_path, "a")]
+        app._tick()
+        await pilot.pause()
+        await pilot.pause()
+        assert summary.display  # a run appeared -> shown
+        assert "live 1" in str(summary.content)
