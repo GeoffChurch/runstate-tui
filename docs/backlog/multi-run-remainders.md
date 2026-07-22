@@ -1,33 +1,41 @@
 # Multi-run table — remaining deferred work
 
-**Status:** the multi-run table **SHIPPED** (PR #11 `edc40b5`) and the **glob resolver SHIPPED**
-(PR #16 `e72bbac`). The table's design-of-record now lives in the code (`multirun.py`, `pool.py`,
-`resolver.py`) plus its specs — `../superpowers/specs/2026-07-18-stage4-multi-run-table-design.md`
-(owner-thread pool, keyed reconcile, per-frame frozen clock, `⚠ I/O stalled` watchdog) and
+**Status:** the multi-run table **SHIPPED** (PR #11 `edc40b5`), the **glob resolver SHIPPED**
+(PR #16 `e72bbac`), and **issue-flood aggregation SHIPPED** as the fleet summary strip (PR #18
+`22fcc68`). The design-of-record lives in the code (`multirun.py`, `pool.py`, `resolver.py`,
+`format.py`) plus its specs — `../superpowers/specs/2026-07-18-stage4-multi-run-table-design.md`
+(owner-thread pool, keyed reconcile, per-frame frozen clock, `⚠ I/O stalled` watchdog),
 `../superpowers/specs/2026-07-21-glob-resolver-design.md` (live directory discovery, minimal-backtrack
-labels). This doc carries only what is **still deferred** at the table.
+labels), and `../superpowers/specs/2026-07-22-flood-summary-strip-design.md` (the always-on legend /
+roll-up strip). This doc carries only what is **still deferred** at the table.
 
 Resolved since the old "Stage 4" doc: the **per-frame `now`** concern is closed — `fold_frame` folds
 every run under a per-frame frozen clock (`replace(env, clock=lambda: now)`); the legacy
-`render_table` per-row resampling is off the live multi-run path.
+`render_table` per-row resampling is off the live multi-run path. Issue-flood was reframed from
+"collapse N badges" into the **additive** summary strip (the table keeps one-row-per-run; the strip
+tallies status-partition + non-twin issue tags, worst-first, no threshold).
 
-## 1. The `cells` resolver — the last deferred resolver
+## The `cells` resolver — the only remaining multi-run feature
 
-`explicit` / `const` / `glob` all shipped; `cells` (a **workload-specific sweep**) is the one
-resolver left. It is just another `Resolver` (`Time → list[RunRef]`) dropped into the CLI dispatch +
-`MultiRunApp` — it reuses the shipped discovery + `disambiguate` machinery in `resolver.py`, so the
-seam is trivial. **Open question before building:** what a "cell" concretely is — a runstate
-namespace/grouping? a parameter-sweep grid config? It was never pinned down (a bare word in core
-spec §6). Pin the meaning against a real workload first, or drop it (YAGNI) if it never crystallizes.
+`explicit` / `const` / `glob` all shipped; `cells` (a **workload-specific sweep**) is the one resolver
+left. Mechanically trivial: it's just another `Resolver` (`Time → list[RunRef]`) dropped into the CLI
+dispatch + `MultiRunApp`, reusing the shipped discovery + `disambiguate` machinery in `resolver.py`.
 
-## 2. Issue-flood aggregation (spec §3.3 / §7, ISA-18.2)
+**What it means** (investigated 2026-07-22, cross-repo — origin: `runstate/docs/backlog/third-party-observer.md`
+§3): the `explicit`/`glob`/`cells` trichotomy maps to the three real on-disk layouts runstate observes.
+`glob` = flat `runs/*.db` (the *translation* workload); **`cells` = the *mycooc* experiment/cell layout**
+— an experiment is a set of **cells** (variants), each a thin dir (`outputs/experiments/<exp>/<cell>/`)
+holding a **pointer** (`.run_id` → current-rid) into a content-addressed run home
+(`runs/<rid[:2]>/<rid>/`). The resolver walks an experiment's cell-pointers to each cell's current run.
+That's the "workload-specific sweep": a `runstate.sweep` produces an experiment of cells.
 
-The `|I|=1` core can't flood; the table can. A shared-FS hiccup can paint **hundreds of identical
-badges** across rows. Collapse N identical badges into **one super-issue** at the table level, while
-the drill-down still enumerates all N. **Open design questions:** the equivalence key (same
-`IssueKind`? kind + message? a kind seen across ≥K distinct runs), the flood threshold K, and the
-render locus (a table-wide banner — "17 runs unreadable — shared-FS?" — vs. per-row treatment). Not
-built; the `_marker` axis in `multirun.py` is where it would hook.
+**Why it's gated** (not merely undefined): runstate deliberately provides **no** cell/enumeration API
+— "the app, not runstate, should own the layout adapters"; a `list_runs()` capability was *refuted*
+upstream (`runstate/docs/backlog/cockpit.md`). So a `cells` resolver hard-codes mycooc's pointer layout
+in the tui, and that layout is itself still settling (Recipe 1 holds for only ~25% of mycooc's cells;
+the cell/run split is still being deliberated in runstate's backlog). **Build it only on a concrete
+need to dashboard a live mycooc sweep, with a real fixture to test against — otherwise defer (YAGNI).**
+See the `runstate-tui-cells-resolver-meaning` session memory.
 
 ## Related deferred findings that surface here (not table features)
 
