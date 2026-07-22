@@ -1,8 +1,10 @@
 # README showcase — scenario-backed screenshots & GIFs
 
-**Status:** todo (deferred; documentation polish). Add visual showcases of the cockpit's screens
-and usage to the README, generated **from the fixture basis** so they're deterministic and
-regenerable — not hand-captured.
+**Status:** static screenshots **SHIPPED** (PR #12 `4b662a7`) — `scripts/showcase.py` drives the
+real app headlessly over seeded logs into 5 deterministic scenes (`docs/img/`, embedded in the
+README `## Screens`), with a `tests/test_showcase.py` CI smoke test. **GIFs (animated usage) remain
+deferred** — the scenes/approach below are kept as the reference for that follow-up. Everything is
+generated **from the fixture basis** so it's deterministic and regenerable, not hand-captured.
 
 ## Why scenario-backed
 
