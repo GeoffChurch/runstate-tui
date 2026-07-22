@@ -465,3 +465,126 @@ async def _enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, DrillDownScreen)
+
+
+def test_table_disambiguates_colliding_run_stems(tmp_path):
+    asyncio.run(_table_disambiguates_colliding_run_stems(tmp_path))
+
+
+async def _table_disambiguates_colliding_run_stems(tmp_path):
+    # Two runs with the SAME stem "trial" in different subdirs (the recursive-glob sweep
+    # case). Distinct rows (keyed by full RunRef); the `run` column must show the minimal
+    # disambiguating path, not two identical "trial"s.
+    g1 = tmp_path / "g1"
+    g1.mkdir()
+    g2 = tmp_path / "g2"
+    g2.mkdir()
+    a = _seed(g1, "trial")
+    b = _seed(g2, "trial")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.get_cell(ref_key(a), "run") == "g1/trial"
+        assert t.get_cell(ref_key(b), "run") == "g2/trial"
+
+
+def test_table_run_column_is_bare_stem_when_unique(tmp_path):
+    asyncio.run(_table_run_column_is_bare_stem_when_unique(tmp_path))
+
+
+async def _table_run_column_is_bare_stem_when_unique(tmp_path):
+    # The no-op property: unique stems -> the `run` cell is the bare stem, exactly as
+    # before the disambiguation label existed (no churn to existing behavior).
+    a = _seed(tmp_path, "alpha")
+    b = _seed(tmp_path, "beta")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.get_cell(ref_key(a), "run") == "alpha"
+        assert t.get_cell(ref_key(b), "run") == "beta"
+
+
+def test_zero_match_shows_placeholder_then_swaps_to_table(tmp_path):
+    asyncio.run(_zero_match_shows_placeholder_then_swaps(tmp_path))
+
+
+async def _zero_match_shows_placeholder_then_swaps(tmp_path):
+    # Glob mode with an empty_hint: an empty frame shows the placeholder and hides the
+    # table; when a run appears, the placeholder hides and the table shows.
+    live = {"refs": []}
+    app = MultiRunApp(
+        lambda now: list(live["refs"]),
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        empty_hint="watching /runs/**/*.db — no runs yet",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        empty = app.query_one("#empty", Static)
+        t = app.query_one("#runs", DataTable)
+        assert empty.display and not t.display
+        assert "no runs yet" in str(empty.content)
+        live["refs"] = [_seed(tmp_path, "a")]
+        app._tick()
+        await pilot.pause()
+        await pilot.pause()
+        assert t.display and not empty.display
+        assert t.row_count == 1
+
+
+def test_no_empty_hint_never_shows_placeholder(tmp_path):
+    asyncio.run(_no_empty_hint_never_shows_placeholder(tmp_path))
+
+
+async def _no_empty_hint_never_shows_placeholder(tmp_path):
+    # explicit/single mode passes no empty_hint: even a (degenerate) empty frame must not
+    # pop a placeholder -- the table stays the shown widget.
+    live = {"refs": [_seed(tmp_path, "a")]}
+    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        empty = app.query_one("#empty", Static)
+        assert not empty.display
+        live["refs"] = []
+        app._tick()
+        await pilot.pause()
+        await pilot.pause()
+        assert not empty.display  # no hint -> never shown
+
+
+def test_enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
+    asyncio.run(_enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path))
+
+
+async def _enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
+    # M1: action_detail must open the drill-down from the LAST DISPLAYED frame's ref map,
+    # never by re-running the resolver on the render thread. Prove it: the resolver yields
+    # `a` only on its first call, then nothing. The row is displayed from that first frame;
+    # pressing enter must still open a's drill-down (a fresh resolve would return [] -> no
+    # screen) AND must not have called the resolver again.
+    a = _seed(tmp_path, "a")
+    calls = {"n": 0}
+
+    def resolver(now):
+        calls["n"] += 1
+        return [a] if calls["n"] <= 1 else []
+
+    app = MultiRunApp(resolver, Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.row_count == 1
+        calls_before_enter = calls["n"]
+        t.move_cursor(row=t.get_row_index(ref_key(a)))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DrillDownScreen)  # opened despite a fresh resolve -> []
+        assert app.screen._ref == a
+        assert calls["n"] == calls_before_enter  # action_detail did NOT re-resolve

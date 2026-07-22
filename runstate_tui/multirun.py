@@ -13,7 +13,7 @@ from .detail import _TEARDOWN_ERRORS, DrillDownScreen
 from .env import Env
 from .format import status_color
 from .pool import ChannelPool, Table, fold_frame
-from .resolver import Resolver, RunRef, ref_key
+from .resolver import Resolver, RunRef, disambiguate, ref_key
 from .types import Row, Severity
 
 _COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
@@ -49,12 +49,12 @@ def _marker(row: Row) -> Text:
     return out
 
 
-def _cells(ref: RunRef, row: Row) -> tuple[Text, str, str, str, str, str, str, Text]:
+def _cells(row: Row, label: str) -> tuple[Text, str, str, str, str, str, str, Text]:
     """The 8 column cells — same field semantics as format_row, one field per column.
-    The leading `dot` cell is a traffic-light ● redundant with the `status` text cell
-    (never the sole signal)."""
+    `label` is the run's display name (the disambiguated minimal path from
+    `disambiguate`; a bare stem when the run_id is unique). The leading `dot` cell is a
+    traffic-light ● redundant with the `status` text cell (never the sole signal)."""
     dot = Text("●", style=status_color(row.status))
-    run_id = ref[0]
     status = row.status.label + (f": {row.status.detail}" if row.status.detail else "")
     step = "" if row.frontier is None else str(row.frontier)
     age = "" if row.freshness is None else f"{row.freshness:.0f}s"
@@ -64,7 +64,7 @@ def _cells(ref: RunRef, row: Row) -> tuple[Text, str, str, str, str, str, str, T
         name, val, vstep = row.value
         value = f"{name}={val}" + (f"@{vstep}" if vstep is not None else "")
     elapsed = "" if row.elapsed is None else f"{row.elapsed:.0f}s"
-    return (dot, run_id, status, step, age, value, elapsed, _marker(row))
+    return (dot, label, status, step, age, value, elapsed, _marker(row))
 
 
 class TableReady(Message):
@@ -84,10 +84,16 @@ class MultiRunApp(App[None]):
         tick_interval: float = 1.0,
         pool_cap: int = 128,
         stall_ticks: int = 3,
+        empty_hint: str | None = None,
     ) -> None:
         super().__init__()
         self._resolver = resolver
         self._env = env
+        self._empty_hint = empty_hint
+        # The last delivered frame's key->ref map. action_detail resolves the selected row
+        # from THIS (main-thread, already-displayed) snapshot -- never by re-running the
+        # resolver on the render thread, which for a glob resolver is a full rglob disk walk.
+        self._refs_by_key: dict[str, RunRef] = {}
         self._tick_interval = tick_interval
         self._pool = ChannelPool(cap=pool_cap)
         self._stall_after = stall_ticks * tick_interval
@@ -106,6 +112,7 @@ class MultiRunApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="stall")  # the watchdog banner (hidden via display, see on_mount)
+        yield Static("", id="empty")  # the zero-match placeholder (glob mode; toggled in reconcile)
         yield DataTable(id="runs")
 
     def on_mount(self) -> None:
@@ -121,6 +128,9 @@ class MultiRunApp(App[None]):
         # empirically) -- an empty renderable is NOT the same as no line, so the banner
         # must be display-toggled, not just text-cleared, to truly disappear.
         self.query_one("#stall", Static).display = False
+        empty = self.query_one("#empty", Static)
+        empty.update(self._empty_hint or "")
+        empty.display = False
         # MAIN-thread, independent of the owner thread — a wedged owner thread
         # can't also freeze the watchdog.
         self.set_interval(self._tick_interval, self._on_watchdog)
@@ -175,6 +185,8 @@ class MultiRunApp(App[None]):
         self._last_ready = self._env.clock()
         t = self.query_one("#runs", DataTable)
         want = {ref_key(ref) for ref, _ in msg.table}
+        labels = disambiguate([ref for ref, _ in msg.table])
+        self._refs_by_key = {ref_key(ref): ref for ref, _ in msg.table}
         sel = None
         if t.row_count:
             sel = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
@@ -189,7 +201,7 @@ class MultiRunApp(App[None]):
             present &= want
             for ref, row in msg.table:
                 key = ref_key(ref)
-                cells = _cells(ref, row)
+                cells = _cells(row, labels[key])
                 if key in present:
                     for col, val in zip(_COLUMNS, cells, strict=True):
                         t.update_cell(key, col, val)
@@ -203,6 +215,13 @@ class MultiRunApp(App[None]):
             if sel is not None and sel in want:
                 # sort() doesn't track the selected row key; restore it explicitly.
                 t.move_cursor(row=t.get_row_index(sel))
+        empty = self.query_one("#empty", Static)
+        if self._empty_hint is not None and not want:
+            empty.display = True
+            t.display = False
+        else:
+            empty.display = False
+            t.display = True
 
     def _is_stalled(self) -> bool:
         if self._last_ready is None:
@@ -236,9 +255,11 @@ class MultiRunApp(App[None]):
         key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
         if key is None:  # every row's key is ref_key(ref) (str); defensive only
             return
-        # reconstruct from the resolver rather than touching the owner-thread pool.
-        by_key = {ref_key(r): r for r in self._resolver(self._env.clock())}
-        ref = by_key.get(key)
+        # Map the selected row off the last DISPLAYED frame (a main-thread snapshot), NOT a
+        # synchronous self._resolver() here: for a glob resolver that re-resolve would be a
+        # full rglob disk walk on the render thread, and could return a different set than
+        # the one the cursor is pointing at.
+        ref = self._refs_by_key.get(key)
         if ref is not None:
             self.push_screen(DrillDownScreen(ref, self._env, self._tick_interval))
 

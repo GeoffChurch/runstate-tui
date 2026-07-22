@@ -39,3 +39,124 @@ def test_ref_key_distinguishes_same_basename_across_roots():
     b = ("run1", "/b", "sqlite")  # same run_id (Path.stem), different root
     assert ref_key(a) != ref_key(b)
     assert ref_key(a) == ref_key(("run1", "/a", "sqlite"))  # stable
+
+
+def test_glob_resolver_discovers_nested_db_files(tmp_path):
+    from runstate_tui.resolver import glob_resolver, ref_from_path
+
+    (tmp_path / "exp1").mkdir()
+    (tmp_path / "a.db").write_text("")
+    (tmp_path / "exp1" / "trial.db").write_text("")
+    refs = glob_resolver(str(tmp_path))(0.0)
+    assert set(refs) == {
+        ref_from_path(str(tmp_path / "a.db")),
+        ref_from_path(str(tmp_path / "exp1" / "trial.db")),
+    }
+
+
+def test_glob_resolver_is_live_reflecting_new_files(tmp_path):
+    from runstate_tui.resolver import glob_resolver
+
+    resolve = glob_resolver(str(tmp_path))
+    assert resolve(0.0) == []
+    (tmp_path / "new.db").write_text("")
+    assert [r[0] for r in resolve(1.0)] == ["new"]
+
+
+def test_glob_resolver_is_symlink_cycle_safe(tmp_path):
+    import os
+
+    from runstate_tui.resolver import glob_resolver
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.db").write_text("")
+    (tmp_path / "sub" / "b.db").write_text("")
+    os.symlink(tmp_path, tmp_path / "sub" / "loop")  # a DIRECTORY cycle
+    # Must RETURN (not hang) and NOT explode into sub/loop/sub/loop/... entries:
+    # pathlib.rglob does not recurse into symlinked directories.
+    refs = glob_resolver(str(tmp_path))(0.0)
+    assert sorted(r[0] for r in refs) == ["a", "b"]
+
+
+def test_disambiguate_is_a_noop_when_stems_are_unique():
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    refs = [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
+    labels = disambiguate(refs)
+    assert labels[ref_key(refs[0])] == "a"
+    assert labels[ref_key(refs[1])] == "b"
+
+
+def test_disambiguate_grows_only_the_colliding_group():
+    # 99 unique stems + one colliding pair: ONLY the pair grows a parent level; the rest
+    # stay bare (ragged-minimal, not uniform-depth).
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    refs = [(f"run{i:03d}", "/runs/g1", "sqlite") for i in range(1, 100)]
+    refs += [("run000", "/runs/g1", "sqlite"), ("run000", "/runs/g2", "sqlite")]
+    labels = disambiguate(refs)
+    assert labels[ref_key(("run050", "/runs/g1", "sqlite"))] == "run050"  # untouched
+    assert labels[ref_key(("run000", "/runs/g1", "sqlite"))] == "g1/run000"
+    assert labels[ref_key(("run000", "/runs/g2", "sqlite"))] == "g2/run000"
+
+
+def test_disambiguate_backtracks_deeper_when_the_parent_also_collides():
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    a = ("trial", "/runs/a/g", "sqlite")
+    b = ("trial", "/runs/b/g", "sqlite")  # same stem AND same parent dir name "g"
+    labels = disambiguate([a, b])
+    assert labels[ref_key(a)] == "a/g/trial"
+    assert labels[ref_key(b)] == "b/g/trial"
+
+
+def test_disambiguate_terminates_on_suffix_overlap():
+    # One run's full path is a suffix of the other's -> the shorter maxes out while the
+    # longer keeps growing; must terminate and disambiguate, not loop forever.
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    short = ("trial", "/x", "sqlite")  # parts end (..., "x", "trial")
+    long_ = ("trial", "/y/x", "sqlite")  # parts end (..., "y", "x", "trial")
+    labels = disambiguate([short, long_])
+    assert labels[ref_key(short)] != labels[ref_key(long_)]
+
+
+def test_disambiguate_renders_absolute_anchor_without_double_slash():
+    # N2: when a collision forces the label all the way to the absolute-path anchor, the
+    # rendered label must be "/r/trial", not "//r/trial". (Root basename "r" also appears as
+    # a nested dir name, so `a` must backtrack past the anchor to disambiguate from `b`.)
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    a = ("trial", "/r", "sqlite")  # parts ('/', 'r', 'trial')
+    b = ("trial", "/r/r", "sqlite")  # parts ('/', 'r', 'r', 'trial')
+    labels = disambiguate([a, b])
+    assert labels[ref_key(a)] == "/r/trial"  # single leading slash, not "//r/trial"
+    assert labels[ref_key(b)] == "r/r/trial"
+
+
+def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):
+    # Pins the load-bearing pathlib guarantee (spec symlink table): rglob MATCHES a
+    # symlinked *file* (the common `latest.db -> run.db` pattern) but does NOT recurse into
+    # a symlinked *directory* (the documented fail-safe gap). A regression to
+    # glob.glob(recursive=True) would flip the second assert (and explode on cycles).
+    import os
+
+    from runstate_tui.resolver import glob_resolver
+
+    ext_file = tmp_path / "store" / "run_ext.db"
+    ext_file.parent.mkdir()
+    ext_file.write_text("")
+    ext_dir = tmp_path / "ext"
+    ext_dir.mkdir()
+    (ext_dir / "inside.db").write_text("")
+
+    root = tmp_path / "runs"
+    root.mkdir()
+    (root / "local.db").write_text("")
+    os.symlink(ext_file, root / "latest.db")  # symlinked FILE -> matched
+    os.symlink(ext_dir, root / "linked")  # symlinked DIR  -> NOT recursed
+
+    run_ids = sorted(r[0] for r in glob_resolver(str(root))(0.0))
+    assert "local" in run_ids
+    assert "latest" in run_ids  # symlinked file IS found
+    assert "inside" not in run_ids  # run inside a symlinked dir is NOT (fail-safe gap)

@@ -37,3 +37,39 @@ def test_no_args_is_usage_error():
     import runstate_tui.__main__ as m
 
     assert m.main([]) == 2
+
+
+def test_directory_argument_constructs_multirun_with_glob(monkeypatch, tmp_path):
+    import runstate_tui.__main__ as m
+    from runstate_tui.resolver import ref_from_path
+
+    made = {}
+
+    def fake_run(self):
+        made["multi"] = self
+        made["refs"] = self._resolver(0.0)  # prove main() built the glob resolver
+
+    monkeypatch.setattr(m.MultiRunApp, "run", fake_run)
+    (tmp_path / "exp1").mkdir()
+    (tmp_path / "a.db").write_text("")
+    (tmp_path / "exp1" / "trial.db").write_text("")
+    m.main([str(tmp_path)])
+    assert "multi" in made
+    assert set(made["refs"]) == {
+        ref_from_path(str(tmp_path / "a.db")),
+        ref_from_path(str(tmp_path / "exp1" / "trial.db")),
+    }
+    assert made["multi"]._empty_hint is not None  # glob mode wires a placeholder hint
+
+
+def test_single_db_file_still_constructs_single(monkeypatch, tmp_path):
+    # A single .db FILE (not a dir) still routes to SingleRunApp -- the is_dir() branch
+    # must not swallow the single-file case.
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    f = tmp_path / "a.db"
+    f.write_text("")
+    m.main([str(f)])
+    assert "single" in made

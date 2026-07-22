@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
@@ -30,6 +30,63 @@ def explicit_resolver(refs: list[RunRef]) -> Resolver:
         return list(snapshot)
 
     return resolve
+
+
+def glob_resolver(root: str) -> Resolver:
+    """A LIVE resolver over a directory: each frame, discover every ``*.db`` run under
+    `root` (recursively) and return their RunRefs. Uses ``Path.rglob`` -- which does NOT
+    recurse into symlinked directories -- so a cyclic symlink can neither hang nor explode
+    the scan (verified 2026-07-21). Matches open via ``attach_channel`` (never create), so
+    a stale / foreign / half-written ``.db`` reads ``missing`` / ``unreadable`` and is left
+    byte-identical -- the fold classifies it, the resolver does not pre-filter. Order is
+    irrelevant: the table sorts on the (disambiguated) run column."""
+    root_path = Path(root)
+
+    def resolve(_now: float) -> list[RunRef]:
+        # No dedup: rglob yields each path once and ref_from_path is injective over distinct
+        # paths (a symlinked file and its target still have distinct paths). Unlike
+        # explicit_resolver, whose CLI args can legitimately repeat, glob has no dup source.
+        return [ref_from_path(str(p)) for p in root_path.rglob("*.db")]
+
+    return resolve
+
+
+def disambiguate(refs: Sequence[RunRef]) -> dict[str, str]:
+    """Map each ref (by ``ref_key``) to the SHORTEST trailing path suffix that is unique
+    across `refs`. Start every run at its bare stem; any group that still collides grows
+    one more parent level; repeat until no group collides. Ragged-minimal -- a lone
+    collision never lengthens the labels of already-unique runs. A NO-OP when every stem
+    is unique (each label is the bare stem), so applying it globally never changes a table
+    whose stems don't collide. Termination is guaranteed by the depth cap: `grew` flips
+    only when some depth strictly increases, and each depth is bounded by its own path
+    length, so the loop runs at most sum(len(parts)) rounds. Two refs sharing an identical
+    path (same root+run_id, differing only in backend) share a part-tuple and thus a label
+    -- harmless (rows stay distinct by ``ref_key``), and unreachable from the all-sqlite
+    ``ref_from_path`` wiring."""
+    parts: dict[str, tuple[str, ...]] = {ref_key(r): Path(r[1], r[0]).parts for r in refs}
+    depth: dict[str, int] = {k: 1 for k in parts}
+
+    def label(k: str) -> str:
+        # str(Path(*suffix)) renders the trailing components cleanly -- notably it collapses
+        # the absolute-anchor case ('/', 'r', 'trial') to "/r/trial" rather than the
+        # "//r/trial" a bare "/".join yields. Grouping and final render share this function,
+        # so uniqueness is judged on exactly what is displayed.
+        return str(Path(*parts[k][-depth[k] :]))
+
+    while True:
+        groups: dict[str, list[str]] = {}
+        for k in parts:
+            groups.setdefault(label(k), []).append(k)
+        grew = False
+        for members in groups.values():
+            if len(members) > 1:
+                for k in members:
+                    if depth[k] < len(parts[k]):
+                        depth[k] += 1
+                        grew = True
+        if not grew:
+            break
+    return {k: label(k) for k in parts}
 
 
 def ref_key(ref: RunRef) -> str:
