@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich.text import Text
 from runstate.channel import Envelope
 from runstate.observables import Outcome
 
-from .types import Row, Status, StatusKind
+from .types import _STATUS_TWIN_ISSUES, IssueKind, Row, Severity, Status, StatusKind
 
 _TOPIC_COLORS = {"lifecycle": "#539bf5", "control": "#d29922", "value": "#3fb950"}
 _STATUS_COLORS = {
@@ -84,6 +86,50 @@ def format_summary_card(row: Row) -> Text:
         parts.append(f"⚠ {len(row.issues)} issue" + ("s" if len(row.issues) != 1 else ""))
     line2 = Text("     ".join(parts))
     return Text("\n").join([line1, line2])
+
+
+def _sev_color(severity: Severity) -> str:
+    """The ⚠-tag hue by severity (mirrors _marker): HIGH red, else amber."""
+    return "#f85149" if severity >= Severity.HIGH else "#d29922"
+
+
+def _chip(out: Text, glyph: str, color: str, text: str) -> None:
+    """Append one `<glyph> text   ` chip: the glyph carries `color`; the label stays neutral
+    (explicit style="default" -- Text.append without a style inherits the base and would paint
+    the label, the footgun _marker / format_summary_card also guard)."""
+    out.append(f"{glyph} ", style=color)
+    out.append(f"{text}   ", style="default")
+
+
+def format_fleet_summary(rows: Sequence[Row]) -> Text:
+    """The always-on fleet legend / roll-up strip: one `<glyph> <name> <count>` chip per
+    condition present in `rows`, worst-first `(severity desc, name)`. Statuses partition the
+    fleet (each run once; ● + status_color); issues that are NOT a status-twin are tagged
+    (⚠, colored by Issue.severity). Names are passthrough (Status.label / IssueKind.value).
+    Empty Text for no rows. Pure -- rebuilt each frame in on_table_ready."""
+    status_count: dict[str, int] = {}
+    status_repr: dict[str, Status] = {}
+    for row in rows:
+        lbl = row.status.label
+        status_count[lbl] = status_count.get(lbl, 0) + 1
+        status_repr.setdefault(lbl, row.status)  # a bucket rep -> its color & severity
+    issue_count: dict[IssueKind, int] = {}
+    issue_sev: dict[IssueKind, Severity] = {}
+    for row in rows:
+        for kind in {i.kind for i in row.issues} - _STATUS_TWIN_ISSUES:
+            issue_count[kind] = issue_count.get(kind, 0) + 1
+            issue_sev[kind] = max(
+                issue_sev.get(kind, Severity.OK),
+                max(i.severity for i in row.issues if i.kind == kind),
+            )
+    chips: list[tuple[Severity, str, str, str, int]] = [
+        (status_repr[lbl].severity, lbl, "●", status_color(status_repr[lbl]), n)
+        for lbl, n in status_count.items()
+    ] + [(issue_sev[k], k.value, "⚠", _sev_color(issue_sev[k]), n) for k, n in issue_count.items()]
+    out = Text()
+    for _sev, name, glyph, color, n in sorted(chips, key=lambda c: (-c[0], c[1])):
+        _chip(out, glyph, color, f"{name} {n}")  # severity desc, then name
+    return out
 
 
 def format_envelope(env: Envelope) -> str:

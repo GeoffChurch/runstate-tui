@@ -24,6 +24,15 @@ class IssueKind(Enum):
     INTERNAL_ERROR = "internal_error"
 
 
+# Issue kinds that are the *footnote* of a status verdict, not a separate problem: a
+# byte-torn run is Status.corrupt() + a CORRUPT issue carrying the seq; a fold crash is
+# Status.error() + an INTERNAL_ERROR issue carrying the exception (table.py _corrupt /
+# _fold_error -- deliberate dual-surfacing, feeding the status column AND the drill-down
+# list). A per-event headcount (the fleet summary strip) counts these once, by their
+# status, so it skips them as issue tags.
+_STATUS_TWIN_ISSUES = {IssueKind.CORRUPT, IssueKind.INTERNAL_ERROR}
+
+
 @dataclass(frozen=True)
 class Issue:
     kind: IssueKind
