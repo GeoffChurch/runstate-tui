@@ -129,3 +129,31 @@ def test_disambiguate_terminates_on_suffix_overlap():
     long_ = ("trial", "/y/x", "sqlite")  # parts end (..., "y", "x", "trial")
     labels = disambiguate([short, long_])
     assert labels[ref_key(short)] != labels[ref_key(long_)]
+
+
+def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):
+    # Pins the load-bearing pathlib guarantee (spec symlink table): rglob MATCHES a
+    # symlinked *file* (the common `latest.db -> run.db` pattern) but does NOT recurse into
+    # a symlinked *directory* (the documented fail-safe gap). A regression to
+    # glob.glob(recursive=True) would flip the second assert (and explode on cycles).
+    import os
+
+    from runstate_tui.resolver import glob_resolver
+
+    ext_file = tmp_path / "store" / "run_ext.db"
+    ext_file.parent.mkdir()
+    ext_file.write_text("")
+    ext_dir = tmp_path / "ext"
+    ext_dir.mkdir()
+    (ext_dir / "inside.db").write_text("")
+
+    root = tmp_path / "runs"
+    root.mkdir()
+    (root / "local.db").write_text("")
+    os.symlink(ext_file, root / "latest.db")  # symlinked FILE -> matched
+    os.symlink(ext_dir, root / "linked")  # symlinked DIR  -> NOT recursed
+
+    run_ids = sorted(r[0] for r in glob_resolver(str(root))(0.0))
+    assert "local" in run_ids
+    assert "latest" in run_ids  # symlinked file IS found
+    assert "inside" not in run_ids  # run inside a symlinked dir is NOT (fail-safe gap)
