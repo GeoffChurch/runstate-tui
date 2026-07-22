@@ -465,3 +465,44 @@ async def _enter_opens_drilldown_for_selected_run_and_escape_returns(tmp_path):
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, DrillDownScreen)
+
+
+def test_table_disambiguates_colliding_run_stems(tmp_path):
+    asyncio.run(_table_disambiguates_colliding_run_stems(tmp_path))
+
+
+async def _table_disambiguates_colliding_run_stems(tmp_path):
+    # Two runs with the SAME stem "trial" in different subdirs (the recursive-glob sweep
+    # case). Distinct rows (keyed by full RunRef); the `run` column must show the minimal
+    # disambiguating path, not two identical "trial"s.
+    g1 = tmp_path / "g1"
+    g1.mkdir()
+    g2 = tmp_path / "g2"
+    g2.mkdir()
+    a = _seed(g1, "trial")
+    b = _seed(g2, "trial")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.get_cell(ref_key(a), "run") == "g1/trial"
+        assert t.get_cell(ref_key(b), "run") == "g2/trial"
+
+
+def test_table_run_column_is_bare_stem_when_unique(tmp_path):
+    asyncio.run(_table_run_column_is_bare_stem_when_unique(tmp_path))
+
+
+async def _table_run_column_is_bare_stem_when_unique(tmp_path):
+    # The no-op property: unique stems -> the `run` cell is the bare stem, exactly as
+    # before the disambiguation label existed (no churn to existing behavior).
+    a = _seed(tmp_path, "alpha")
+    b = _seed(tmp_path, "beta")
+    app = MultiRunApp(explicit_resolver([a, b]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.get_cell(ref_key(a), "run") == "alpha"
+        assert t.get_cell(ref_key(b), "run") == "beta"
