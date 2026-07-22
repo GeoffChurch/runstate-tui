@@ -6,15 +6,16 @@ for the feature to slot in additively — the implementation waits for its first
 State (2026-07-22): merged to `master` — Stages 0–3 (single-run observe / drill-down / control),
 the **multi-run table** (PR #11), the drill-down redesign (PR #14), the showcase screenshots (PR
 #12/#13), the integrity taxonomy, the fixture basis, the **runstate locator-split migration** (PR
-#15: `open_channel` → `attach_channel` / `create_channel`), and the **glob resolver** — live
-recursive directory discovery (PR #16). **All the major features have shipped;** what remains below
-is smaller, additive work. (A `runstate-tui-build-state` memory, if present, carries finer-grained
-status, but this doc is the source of truth.)
+#15: `open_channel` → `attach_channel` / `create_channel`), the **glob resolver** — live recursive
+directory discovery (PR #16), and **issue-flood aggregation** — the always-on fleet summary strip (PR
+#18). **All the major features have shipped;** what remains below is smaller, additive work. (A
+`runstate-tui-build-state` memory, if present, carries finer-grained status, but this doc is the
+source of truth.)
 
-- [multi-run-remainders](multi-run-remainders.md) — the table and glob resolver shipped; the tail
-  that's still deferred: the **`cells` resolver** (workload-specific sweep — the last resolver) and
-  **issue-flood aggregation** (ISA-18.2: collapse N identical badges from one FS hiccup into a
-  super-issue). Both drop onto the shipped `MultiRunApp` seam.
+- [multi-run-remainders](multi-run-remainders.md) — the table, glob resolver, and issue-flood strip
+  all shipped; the one deferred multi-run feature left is the **`cells` resolver** (the *mycooc*
+  experiment/cell layout adapter — well-defined but externally gated on mycooc's still-settling
+  layout, so YAGNI-deferred until a concrete need). Drops onto the shipped `MultiRunApp` seam.
 - [liveness-overlay](liveness-overlay.md) — external liveness probes (`os.kill` same-host;
   `squeue`/`kubectl` cross-host). Seam committed in the core spec §2.1/§14.2; core is
   freshness-only. **Also the home of log-level `conflicted`** (2026-07-18 red-team: a reliable
