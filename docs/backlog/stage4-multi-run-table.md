@@ -58,11 +58,18 @@ Build it as a delta pipeline, not a rebuild loop: **resolve-delta → watermark-
 
 ## Prerequisites & gotchas
 
-- **`create=False` (runstate) gates safe globbing** — `open_channel` runs `executescript(_SCHEMA)`
-  at open, silently schema-mutating a foreign *valid* db a glob happens to match. Filed as
-  `GeoffChurch/runstate#14`. Stage-1 explicit-run is lower risk; a broad glob is not. See spec §8.
-- **`max_seq=` (runstate)** — a Stage-4 uniformity nicety only; if filed, `max_seq` (seq) bound
-  **only, never `before=`** (t is never an ordering key). Spec §3.2/§8.
+- **Safe globbing — SHIPPED (runstate locator split, PR #18 `ba26e50`).** The old hazard
+  (`open_channel` ran `executescript(_SCHEMA)` at open, schema-mutating a foreign *valid* db a
+  glob matched) is gone: runstate replaced it with **`attach_channel`** — existing-only, raises
+  `RunNotFound`, never creates or mutates. The tui already migrated (PR #15): `open_and_fold`,
+  `read_log_delta`, and `pool.row_for` open via `attach_channel` + `except RunNotFound` (the
+  stat-before-open dance collapsed), so a stale glob match resolving to a missing / empty / foreign
+  db reads `missing` and is left byte-identical. **A broad glob is now as safe as an explicit
+  run** — build the `glob`/`cells` resolvers directly on that existing open path. (Cockpit item 4
+  closed; spec §8.)
+- **`max_seq=` (runstate)** — a Stage-4 uniformity nicety only, now filed upstream as
+  `GeoffChurch/runstate#15` (the `read()` query layer: `filter=` / `before=` / `max_seq=`). Bound on
+  `max_seq` (seq) **only, never `before=`** (t is never an ordering key). Not blocking. Spec §3.2/§8.
 - **Resolver glob grammar + zero-match** behavior is an open question (spec §12 known gaps).
 - **Terminal-env matrix** (SSH/tmux/`NO_COLOR`/width/UTF-8) should be exercised at the table.
 - The fixture basis (`tests/scenarios/`, `tests/helpers.py`) already has `held_writer_sqlite_run`

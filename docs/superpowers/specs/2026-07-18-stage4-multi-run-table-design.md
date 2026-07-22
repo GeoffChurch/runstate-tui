@@ -115,10 +115,12 @@ parameterized by the selected row's `RunRef` — reconstructed synchronously in 
 ## Resolver
 
 `explicit_resolver(refs: list[RunRef]) -> Resolver` — a fixed list; the CLI accepts multiple
-`<run.db>` paths (`ref_from_path` each). **Deferred:** `glob` (blocked on `create=False` — a glob
-could open+mutate a foreign valid db, the §8 harm; and it is the resolver that would give *live*
+`<run.db>` paths (`ref_from_path` each). **Additive next:** `glob` (**now unblocked** — the
+`create=False` prerequisite shipped as runstate `attach_channel`, existing-only + `RunNotFound` +
+never-mutates, and the tui's open path already uses it; a glob match to a foreign/missing db reads
+`missing`, byte-identical — the §8 harm is gone; this is also the resolver that gives *live*
 discovery of runs not-yet-existing at launch, which the fixed list cannot) and `cells`
-(workload-specific sweep) — both additive.
+(workload-specific sweep).
 
 ## Error handling
 
@@ -146,6 +148,6 @@ main-thread `⚠ I/O stalled` banner.
 
 ## Deferred (all additive, none load-bearing for the MVP)
 
-glob resolver (`create=False`; also the live-discovery path), cells resolver, issue-flood
+glob resolver (`create=False` prerequisite now shipped as `attach_channel`; also the live-discovery path), cells resolver, issue-flood
 aggregation, per-run I/O recovery (cancellable opens), and — explicitly rejected above, not merely
 deferred — watermark-gating / the `fold_log`+`derive_clock` split.
