@@ -13,7 +13,7 @@ from .detail import _TEARDOWN_ERRORS, DrillDownScreen
 from .env import Env
 from .format import status_color
 from .pool import ChannelPool, Table, fold_frame
-from .resolver import Resolver, disambiguate, ref_key
+from .resolver import Resolver, RunRef, disambiguate, ref_key
 from .types import Row, Severity
 
 _COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
@@ -90,6 +90,10 @@ class MultiRunApp(App[None]):
         self._resolver = resolver
         self._env = env
         self._empty_hint = empty_hint
+        # The last delivered frame's key->ref map. action_detail resolves the selected row
+        # from THIS (main-thread, already-displayed) snapshot -- never by re-running the
+        # resolver on the render thread, which for a glob resolver is a full rglob disk walk.
+        self._refs_by_key: dict[str, RunRef] = {}
         self._tick_interval = tick_interval
         self._pool = ChannelPool(cap=pool_cap)
         self._stall_after = stall_ticks * tick_interval
@@ -182,6 +186,7 @@ class MultiRunApp(App[None]):
         t = self.query_one("#runs", DataTable)
         want = {ref_key(ref) for ref, _ in msg.table}
         labels = disambiguate([ref for ref, _ in msg.table])
+        self._refs_by_key = {ref_key(ref): ref for ref, _ in msg.table}
         sel = None
         if t.row_count:
             sel = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
@@ -250,9 +255,11 @@ class MultiRunApp(App[None]):
         key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
         if key is None:  # every row's key is ref_key(ref) (str); defensive only
             return
-        # reconstruct from the resolver rather than touching the owner-thread pool.
-        by_key = {ref_key(r): r for r in self._resolver(self._env.clock())}
-        ref = by_key.get(key)
+        # Map the selected row off the last DISPLAYED frame (a main-thread snapshot), NOT a
+        # synchronous self._resolver() here: for a glob resolver that re-resolve would be a
+        # full rglob disk walk on the render thread, and could return a different set than
+        # the one the cursor is pointing at.
+        ref = self._refs_by_key.get(key)
         if ref is not None:
             self.push_screen(DrillDownScreen(ref, self._env, self._tick_interval))
 

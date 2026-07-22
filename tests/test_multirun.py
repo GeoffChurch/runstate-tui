@@ -556,3 +556,35 @@ async def _no_empty_hint_never_shows_placeholder(tmp_path):
         await pilot.pause()
         await pilot.pause()
         assert not empty.display  # no hint -> never shown
+
+
+def test_enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
+    asyncio.run(_enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path))
+
+
+async def _enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
+    # M1: action_detail must open the drill-down from the LAST DISPLAYED frame's ref map,
+    # never by re-running the resolver on the render thread. Prove it: the resolver yields
+    # `a` only on its first call, then nothing. The row is displayed from that first frame;
+    # pressing enter must still open a's drill-down (a fresh resolve would return [] -> no
+    # screen) AND must not have called the resolver again.
+    a = _seed(tmp_path, "a")
+    calls = {"n": 0}
+
+    def resolver(now):
+        calls["n"] += 1
+        return [a] if calls["n"] <= 1 else []
+
+    app = MultiRunApp(resolver, Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.row_count == 1
+        calls_before_enter = calls["n"]
+        t.move_cursor(row=t.get_row_index(ref_key(a)))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DrillDownScreen)  # opened despite a fresh resolve -> []
+        assert app.screen._ref == a
+        assert calls["n"] == calls_before_enter  # action_detail did NOT re-resolve
