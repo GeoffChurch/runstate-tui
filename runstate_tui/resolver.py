@@ -32,6 +32,23 @@ def explicit_resolver(refs: list[RunRef]) -> Resolver:
     return resolve
 
 
+def glob_resolver(root: str) -> Resolver:
+    """A LIVE resolver over a directory: each frame, discover every ``*.db`` run under
+    `root` (recursively) and return their RunRefs. Uses ``Path.rglob`` -- which does NOT
+    recurse into symlinked directories -- so a cyclic symlink can neither hang nor explode
+    the scan (verified 2026-07-21). Matches open via ``attach_channel`` (never create), so
+    a stale / foreign / half-written ``.db`` reads ``missing`` / ``unreadable`` and is left
+    byte-identical -- the fold classifies it, the resolver does not pre-filter. Order is
+    irrelevant: the table sorts on the (disambiguated) run column."""
+    root_path = Path(root)
+
+    def resolve(_now: float) -> list[RunRef]:
+        refs = [ref_from_path(str(p)) for p in root_path.rglob("*.db")]
+        return list(dict.fromkeys(refs))  # dedup, order preserved
+
+    return resolve
+
+
 def ref_key(ref: RunRef) -> str:
     """A stable, collision-proof string key for a RunRef (run_id alone collides:
     a/run1.db and b/run1.db both have run_id 'run1'). NUL can't appear in a path,
