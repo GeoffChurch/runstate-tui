@@ -84,10 +84,12 @@ class MultiRunApp(App[None]):
         tick_interval: float = 1.0,
         pool_cap: int = 128,
         stall_ticks: int = 3,
+        empty_hint: str | None = None,
     ) -> None:
         super().__init__()
         self._resolver = resolver
         self._env = env
+        self._empty_hint = empty_hint
         self._tick_interval = tick_interval
         self._pool = ChannelPool(cap=pool_cap)
         self._stall_after = stall_ticks * tick_interval
@@ -106,6 +108,7 @@ class MultiRunApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="stall")  # the watchdog banner (hidden via display, see on_mount)
+        yield Static("", id="empty")  # the zero-match placeholder (glob mode; toggled in reconcile)
         yield DataTable(id="runs")
 
     def on_mount(self) -> None:
@@ -121,6 +124,9 @@ class MultiRunApp(App[None]):
         # empirically) -- an empty renderable is NOT the same as no line, so the banner
         # must be display-toggled, not just text-cleared, to truly disappear.
         self.query_one("#stall", Static).display = False
+        empty = self.query_one("#empty", Static)
+        empty.update(self._empty_hint or "")
+        empty.display = False
         # MAIN-thread, independent of the owner thread — a wedged owner thread
         # can't also freeze the watchdog.
         self.set_interval(self._tick_interval, self._on_watchdog)
@@ -204,6 +210,13 @@ class MultiRunApp(App[None]):
             if sel is not None and sel in want:
                 # sort() doesn't track the selected row key; restore it explicitly.
                 t.move_cursor(row=t.get_row_index(sel))
+        empty = self.query_one("#empty", Static)
+        if self._empty_hint is not None and not want:
+            empty.display = True
+            t.display = False
+        else:
+            empty.display = False
+            t.display = True
 
     def _is_stalled(self) -> bool:
         if self._last_ready is None:

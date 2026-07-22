@@ -506,3 +506,53 @@ async def _table_run_column_is_bare_stem_when_unique(tmp_path):
         t = app.query_one("#runs", DataTable)
         assert t.get_cell(ref_key(a), "run") == "alpha"
         assert t.get_cell(ref_key(b), "run") == "beta"
+
+
+def test_zero_match_shows_placeholder_then_swaps_to_table(tmp_path):
+    asyncio.run(_zero_match_shows_placeholder_then_swaps(tmp_path))
+
+
+async def _zero_match_shows_placeholder_then_swaps(tmp_path):
+    # Glob mode with an empty_hint: an empty frame shows the placeholder and hides the
+    # table; when a run appears, the placeholder hides and the table shows.
+    live = {"refs": []}
+    app = MultiRunApp(
+        lambda now: list(live["refs"]),
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        empty_hint="watching /runs/**/*.db — no runs yet",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        empty = app.query_one("#empty", Static)
+        t = app.query_one("#runs", DataTable)
+        assert empty.display and not t.display
+        assert "no runs yet" in str(empty.content)
+        live["refs"] = [_seed(tmp_path, "a")]
+        app._tick()
+        await pilot.pause()
+        await pilot.pause()
+        assert t.display and not empty.display
+        assert t.row_count == 1
+
+
+def test_no_empty_hint_never_shows_placeholder(tmp_path):
+    asyncio.run(_no_empty_hint_never_shows_placeholder(tmp_path))
+
+
+async def _no_empty_hint_never_shows_placeholder(tmp_path):
+    # explicit/single mode passes no empty_hint: even a (degenerate) empty frame must not
+    # pop a placeholder -- the table stays the shown widget.
+    live = {"refs": [_seed(tmp_path, "a")]}
+    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        empty = app.query_one("#empty", Static)
+        assert not empty.display
+        live["refs"] = []
+        app._tick()
+        await pilot.pause()
+        await pilot.pause()
+        assert not empty.display  # no hint -> never shown
