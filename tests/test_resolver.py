@@ -63,16 +63,6 @@ def test_glob_resolver_is_live_reflecting_new_files(tmp_path):
     assert [r[0] for r in resolve(1.0)] == ["new"]
 
 
-def test_glob_resolver_dedupes_matches(tmp_path):
-    # rglob won't emit a path twice today, but the resolver contract is a deduped IndexSet;
-    # pin it so a future change can't leak a duplicate RunRef -> a duplicate DataTable row.
-    from runstate_tui.resolver import glob_resolver
-
-    (tmp_path / "a.db").write_text("")
-    refs = glob_resolver(str(tmp_path))(0.0)
-    assert len(refs) == len(set(refs))
-
-
 def test_glob_resolver_is_symlink_cycle_safe(tmp_path):
     import os
 
@@ -129,6 +119,19 @@ def test_disambiguate_terminates_on_suffix_overlap():
     long_ = ("trial", "/y/x", "sqlite")  # parts end (..., "y", "x", "trial")
     labels = disambiguate([short, long_])
     assert labels[ref_key(short)] != labels[ref_key(long_)]
+
+
+def test_disambiguate_renders_absolute_anchor_without_double_slash():
+    # N2: when a collision forces the label all the way to the absolute-path anchor, the
+    # rendered label must be "/r/trial", not "//r/trial". (Root basename "r" also appears as
+    # a nested dir name, so `a` must backtrack past the anchor to disambiguate from `b`.)
+    from runstate_tui.resolver import disambiguate, ref_key
+
+    a = ("trial", "/r", "sqlite")  # parts ('/', 'r', 'trial')
+    b = ("trial", "/r/r", "sqlite")  # parts ('/', 'r', 'r', 'trial')
+    labels = disambiguate([a, b])
+    assert labels[ref_key(a)] == "/r/trial"  # single leading slash, not "//r/trial"
+    assert labels[ref_key(b)] == "r/r/trial"
 
 
 def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):

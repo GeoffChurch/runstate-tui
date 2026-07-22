@@ -43,8 +43,10 @@ def glob_resolver(root: str) -> Resolver:
     root_path = Path(root)
 
     def resolve(_now: float) -> list[RunRef]:
-        refs = [ref_from_path(str(p)) for p in root_path.rglob("*.db")]
-        return list(dict.fromkeys(refs))  # dedup, order preserved
+        # No dedup: rglob yields each path once and ref_from_path is injective over distinct
+        # paths (a symlinked file and its target still have distinct paths). Unlike
+        # explicit_resolver, whose CLI args can legitimately repeat, glob has no dup source.
+        return [ref_from_path(str(p)) for p in root_path.rglob("*.db")]
 
     return resolve
 
@@ -55,14 +57,21 @@ def disambiguate(refs: Sequence[RunRef]) -> dict[str, str]:
     one more parent level; repeat until no group collides. Ragged-minimal -- a lone
     collision never lengthens the labels of already-unique runs. A NO-OP when every stem
     is unique (each label is the bare stem), so applying it globally never changes a table
-    whose stems don't collide. Distinct refs have distinct part-tuples and `grew` only
-    flips when a depth actually increases, so the loop always terminates (worst case: the
-    full path)."""
+    whose stems don't collide. Termination is guaranteed by the depth cap: `grew` flips
+    only when some depth strictly increases, and each depth is bounded by its own path
+    length, so the loop runs at most sum(len(parts)) rounds. Two refs sharing an identical
+    path (same root+run_id, differing only in backend) share a part-tuple and thus a label
+    -- harmless (rows stay distinct by ``ref_key``), and unreachable from the all-sqlite
+    ``ref_from_path`` wiring."""
     parts: dict[str, tuple[str, ...]] = {ref_key(r): Path(r[1], r[0]).parts for r in refs}
     depth: dict[str, int] = {k: 1 for k in parts}
 
     def label(k: str) -> str:
-        return "/".join(parts[k][-depth[k] :])
+        # str(Path(*suffix)) renders the trailing components cleanly -- notably it collapses
+        # the absolute-anchor case ('/', 'r', 'trial') to "/r/trial" rather than the
+        # "//r/trial" a bare "/".join yields. Grouping and final render share this function,
+        # so uniqueness is judged on exactly what is displayed.
+        return str(Path(*parts[k][-depth[k] :]))
 
     while True:
         groups: dict[str, list[str]] = {}
