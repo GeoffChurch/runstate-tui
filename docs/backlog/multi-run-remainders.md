@@ -15,7 +15,7 @@ every run under a per-frame frozen clock (`replace(env, clock=lambda: now)`); th
 "collapse N badges" into the **additive** summary strip (the table keeps one-row-per-run; the strip
 tallies status-partition + non-twin issue tags, worst-first, no threshold).
 
-## The `cells` resolver — the only remaining multi-run feature
+## The `cells` resolver — the main remaining multi-run feature
 
 `explicit` / `const` / `glob` all shipped; `cells` (a **workload-specific sweep**) is the one resolver
 left. The *discovery* is a small `Resolver` (`Time → list[RunRef]`) dropped into the CLI dispatch +
@@ -25,10 +25,11 @@ left. The *discovery* is a small `Resolver` (`Time → list[RunRef]`) dropped in
 - **Enumeration is a manifest cross-product, not a tree walk.** mycooc's `--status` reads the experiment
   YAML and takes `scenarios × variants (× seeds)`, *constructing* each cell path; it does not walk a
   directory of cells. The cells resolver needs the spec, not just the tree.
-- **It cannot reuse `disambiguate` for labels.** A cell's `RunRef.root` is the content-addressed run
-  home (`runs/<rid[:2]>/<rid>/`, reached by dereferencing the cell's `run` symlink), so `disambiguate`
-  would yield hash-garbage labels (`7c/7cfc…`). The resolver must **supply its own label** (the variant)
-  — the resolver-declared-provenance seam that the generic-grouping note below also rides.
+- **Labels and groups come from the resolver, not the path.** A cell's display name (variant) and group
+  (scenario) are resolver-supplied *attributes* (see the relational grouping note below), not derived by
+  `disambiguate` on `RunRef.root`. This dissolves an earlier over-asserted construction question (does
+  `root` point at the content-addressed home or the cell path?): `root` only has to *open the channel*,
+  and a shared run home correctly yields *one* `RunRef` behind *two* cell rows.
 
 And "**show cells like mycooc's `--status`**" is a *superset* of this resolver, most of which is **not** a
 cells feature: `--status` is a two-level scenario × variant grid whose substance is a **data-plane metric
@@ -55,39 +56,61 @@ the cell/run split is still being deliberated in runstate's backlog). **Build it
 need to dashboard a live mycooc sweep, with a real fixture to test against — otherwise defer (YAGNI).**
 See the `runstate-tui-cells-resolver-meaning` session memory.
 
-## Generic grouping (facet sections) — resolver-declared, deferred
+## Grouping — a per-row *relational* attribute record (the reference-TUI core of `cells`), deferred
 
-A generic **group-by / facet** on the flat table: sort rows by a group key and break them into sections,
-each headed by a per-group `format_fleet_summary` roll-up (the strip logic run per-section instead of
-once). The single-group case renders exactly as today — purely additive. This is the *only* part of
-mycooc's `--status` that generalizes into the cockpit's categories; mycooc domain semantics (seeds,
-metric columns) stay out — a seed is a mycooc naming artifact, not a grouping primitive.
+This is the reference-TUI-generic slice of the `cells` work above: sectioning + labeling the flat table by
+*grouping metadata*, with mycooc's domain specifics (the manifest schema, which axis is a group vs. a
+label, the metric/seed data plane) left to mycooc. **Not a parallel feature — the generic core `cells`
+consumes.** It has a second, cells-free consumer (glob multi-root / translation's roots), which is what can
+*trigger* it independently — not evidence it is separate.
 
-**Design decision (2026-07-23): grouping is resolver-declared only — forgo file/path-derived grouping.**
-The resolver optionally attaches a structured facet per run; the core never infers a group from the path.
-Rationale:
+**The model is relational, not hierarchical (2026-07-23, superseding the earlier "single group key /
+path-derived" sketch).** The resolver yields a per-row **attribute record** — `(RunRef, attrs:
+Mapping[str, str])` — and everything else falls out of it:
 
-- **The core can canonically derive labels but not groups.** Minimal-backtrack labeling has a *right
-  answer* (shortest unique suffix). Grouping is a *coarsening* — "group by which ancestor?" is semantic
-  (is the parent the experiment? the host? the date?), with no canonical depth. A core heuristic would be
-  guessing, and a guessed grouping is a lossy inference of a structure only the layout-owner knows.
-- **No consumer needs core-derived grouping uniquely.** `cells` needs an explicit facet regardless (its
-  `root` is the content-addressed home — the `scenario/variant` structure is already gone); `glob` /
-  translation are resolvers we own, so emitting the path component as a facet is one line, where the
-  layout knowledge already lives.
-- **It unifies with a seam `cells` forces anyway.** `cells` must already override the *label* (see the
-  resolver section above), so a resolver-declared-provenance seam exists regardless; the group key rides
-  it for free — one provenance declaration, two cuts (label = deep suffix, group = shallow prefix).
-  File-based grouping would be a second, weaker provenance path bolted alongside.
+- **Group** by any named attribute (or tuple), potentially at runtime like a pivot. The attributes are
+  named and all present, so there is no baked-in nesting order and no "group by which depth?" ambiguity —
+  that ambiguity was purely an artifact of encoding the relation in a *path*.
+- **Label** = format chosen attributes.
+- Render = group sections, each headed by a per-group `format_fleet_summary` roll-up; the single-group
+  case renders exactly as today (purely additive).
+- **Row identity = the attribute record (the cell), not `run_id`.** Two cells sharing one run become two
+  rows pointing at one `RunRef` — exactly the run-sharing mycooc's symlink indirection was built for —
+  which dissolves the "shared-rid collision" worry, and dissolves the root-construction question with it:
+  `root` only has to *open the channel*; display and identity come from `attrs`, never from `disambiguate`
+  on the root path.
 
-Rejected: **embedding facet metadata in the channel id** (mycooc's seed-from-name style) and stripping it
-transparently — it smuggles structured data through a string when our transport is already rich Python
-objects; strictly worse than a structured facet field, and it clutters (or hides state in) the user's ids.
+**Why relational beats the filesystem / symlink-tree approach** — workable as a *mechanism*, wrong as a
+*model*:
+
+- **Path-as-metadata is the id-embedding anti-pattern one level up.** A directory path is a string;
+  reading scenario/variant off its components is parsing metadata back out of a string — the move already
+  rejected for channel ids, just more socially acceptable because everyone encodes meaning in folders. A
+  tree serializes a *relation* (run ↔ {scenario, variant, seed, …}) into one fixed nesting order, must be
+  hand-edited, and presupposes a hierarchical FS.
+- **It conflates two concerns the sharing design already separates.** mycooc's indirection exists so many
+  cells can *share one run* — its job is sharing/opening (many views → one content-addressed home), not
+  carrying grouping metadata. Which-scenario/which-variant is separate data that merely happens to be
+  co-encoded in the same tree. Keep them apart: the tree stays a pure sharing/GC mechanism; the attributes
+  travel as data.
+- **mycooc's real source is already relational** — the experiment YAML *is* the run → {scenario, variant,
+  seed, config} table; the symlink tree is a *derived materialization* of it. A resolver reads the
+  relational source, it does not reverse-engineer semantics from the materialization.
+- **FS-agnostic.** A relation needs no directories → it also fits `PostgresChannel`, which runstate flagged
+  has *no* root/dir/symlink shape at all (`runstate/docs/backlog/third-party-observer.md` item 3). A
+  hierarchy would exclude Postgres by construction.
+- **Relational subsumes hierarchical, not the reverse.** A path is just one attribute (or its components,
+  named). So "point at a directory and go" survives as a **path → attrs adapter** — one *populator* of the
+  model, the right home for the glob case — not the model itself. The general model costs nothing; the FS
+  convenience is retained as an adapter.
+
+Rejected populators (both smuggle structured data through a string when the transport is rich Python
+objects): embedding facet metadata in the **channel id** (mycooc's seed-from-name style), and treating the
+**directory tree** as the metadata source rather than a sharing mechanism.
 
 **Gate:** deferred until a *second* grouping consumer creates the pull — the glob multi-root / translation
-4-roots view feeling flat. `cells` alone doesn't earn it (mycooc owns its own frontend). Zero-config
-folder grouping, if ever wanted, is recoverable as a `--group-by <depth>` opt-in *on the glob resolver*,
-not a core default.
+view feeling flat. `cells` alone doesn't earn it (mycooc owns its own frontend). The FS convenience, if
+wanted, is the path → attrs adapter above, not a core default.
 
 ## Related deferred findings that surface here (not table features)
 
