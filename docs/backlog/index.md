@@ -13,9 +13,10 @@ directory discovery (PR #16), and **issue-flood aggregation** — the always-on 
 source of truth.)
 
 - [multi-run-remainders](multi-run-remainders.md) — the table, glob resolver, and issue-flood strip
-  all shipped; the one deferred multi-run feature left is the **`cells` resolver** (the *mycooc*
-  experiment/cell layout adapter — well-defined but externally gated on mycooc's still-settling
-  layout, so YAGNI-deferred until a concrete need). Drops onto the shipped `MultiRunApp` seam.
+  all shipped; two deferred multi-run features remain: the **`cells` resolver** (the *mycooc*
+  experiment/cell layout adapter — externally gated on mycooc's still-settling layout) and **generic
+  grouping** (resolver-declared facet sections — never path-inferred; gated on a second grouping
+  consumer). Both YAGNI-deferred, both drop onto the shipped `MultiRunApp` / resolver seams.
 - [liveness-overlay](liveness-overlay.md) — external liveness probes (`os.kill` same-host;
   `squeue`/`kubectl` cross-host). Seam committed in the core spec §2.1/§14.2; core is
   freshness-only. **Also the home of log-level `conflicted`** (2026-07-18 red-team: a reliable
