@@ -8,11 +8,11 @@ from runstate import RunNotFound, attach_channel
 from runstate.channel import Channel
 
 from .env import Env
-from .resolver import RunRef
+from .resolver import Attrs, RunRef
 from .table import _OPEN_ERRORS, _bare, _fold_error, fold_open_channel
 from .types import Row, Status, StatusKind
 
-Table = tuple[tuple[RunRef, Row], ...]
+Table = tuple[tuple[RunRef, Attrs, Row], ...]
 
 # integrity verdicts that mean the pooled handle is no good — evict + close so the
 # next tick cold-opens fresh (self-healing detection; the pool holds only healthy handles).
@@ -91,22 +91,27 @@ class ChannelPool:
         self._open.clear()
 
 
-def fold_frame(pool: ChannelPool, refs: list[RunRef], env: Env, now: float) -> Table:
-    """One owner-thread frame. Reconcile the pool to `refs`, then fold EVERY run fresh
-    under a single per-frame `now` (via a frozen-clock Env so objective/threshold/
-    liveness carry through). The row for `r` == render_single(r) at this `now`."""
+def fold_frame(pool: ChannelPool, items: list[tuple[RunRef, Attrs]], env: Env, now: float) -> Table:
+    """One owner-thread frame. Reconcile the pool to the resolved refs, then fold every
+    DISTINCT run fresh under a single per-frame `now` (via a frozen-clock Env so objective/
+    threshold/liveness carry through). A run named by several items (a shared cell -> one
+    RunRef) folds ONCE and its Row is reused, so shared runs cost one open channel and one
+    read. The row for `r` == render_single(r) at this `now`."""
     frame_env = replace(env, clock=lambda: now)
+    refs = [ref for ref, _ in items]
     pool.reconcile(set(refs))
     # fold_frame is TOTAL: an EXPECTED fold failure is already a loud row (missing/
     # unreadable/corrupt/malformed), so any exception escaping row_for is a genuine
     # internal bug on ONE run. Contain it to a loud per-run `error` row rather than let
     # it sink the whole frame — the table survives; the worker stays fail-fast for
     # catastrophic non-fold bugs (a broken resolver/reconcile, which are outside this loop).
-    rows: list[tuple[RunRef, Row]] = []
-    for ref in refs:
-        try:
-            row = pool.row_for(ref, frame_env)
-        except Exception as exc:  # noqa: BLE001 — internal fold bug -> loud per-run row, table survives
-            row = _fold_error(exc)
-        rows.append((ref, row))
-    return tuple(rows)
+    folded: dict[RunRef, Row] = {}
+    out: list[tuple[RunRef, Attrs, Row]] = []
+    for ref, attrs in items:
+        if ref not in folded:
+            try:
+                folded[ref] = pool.row_for(ref, frame_env)
+            except Exception as exc:  # noqa: BLE001 — internal fold bug -> loud per-run row, table survives
+                folded[ref] = _fold_error(exc)
+        out.append((ref, attrs, folded[ref]))
+    return tuple(out)

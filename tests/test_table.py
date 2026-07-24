@@ -58,7 +58,7 @@ def test_render_table_maps_over_the_resolver_in_order(tmp_path):
 
     # "b" is a missing pointer
     def resolver(now):
-        return [("a", str(tmp_path), "sqlite"), ("b", str(tmp_path), "sqlite")]
+        return [(("a", str(tmp_path), "sqlite"), {}), (("b", str(tmp_path), "sqlite"), {})]
 
     rows = render_table(resolver, _env())
     assert len(rows) == 2

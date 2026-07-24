@@ -1,11 +1,23 @@
+import json
+
+import pytest
+
 from runstate_tui.resolver import const_resolver, ref_from_path
 
 
 def test_const_resolver_yields_the_single_ref_regardless_of_now():
     ref = ("run-1", "/tmp/runs", "sqlite")
     resolve = const_resolver(ref)
-    assert resolve(0.0) == [ref]
-    assert resolve(9999.0) == [ref]
+    assert resolve(0.0) == [(ref, {})]
+    assert resolve(9999.0) == [(ref, {})]
+
+
+def test_resolvers_yield_ref_attrs_pairs():
+    from runstate_tui.resolver import explicit_resolver
+
+    ref = ("r", "/root", "sqlite")
+    assert const_resolver(ref)(0.0) == [(ref, {})]
+    assert explicit_resolver([ref])(0.0) == [(ref, {})]
 
 
 def test_ref_from_path_splits_a_sqlite_db_path():
@@ -18,18 +30,25 @@ def test_explicit_resolver_returns_the_fixed_list_regardless_of_now():
 
     refs = [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
     resolve = explicit_resolver(refs)
-    assert resolve(0.0) == refs and resolve(9999.0) == refs
+    expected = [(r, {}) for r in refs]
+    assert resolve(0.0) == expected and resolve(9999.0) == expected
 
 
 def test_explicit_resolver_dedupes_exact_duplicates_preserving_order():
     from runstate_tui.resolver import explicit_resolver
 
     refs = [("a", "/root", "sqlite"), ("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
-    assert explicit_resolver(refs)(0.0) == [("a", "/root", "sqlite"), ("b", "/root", "sqlite")]
+    assert explicit_resolver(refs)(0.0) == [
+        (("a", "/root", "sqlite"), {}),
+        (("b", "/root", "sqlite"), {}),
+    ]
     # Order-discriminating case: the dedup'd order does NOT coincide with alphabetical, so
     # a sorted(set(...)) mis-implementation (which would yield a before b) fails here.
     reordered = [("b", "/r", "sqlite"), ("b", "/r", "sqlite"), ("a", "/r", "sqlite")]
-    assert explicit_resolver(reordered)(0.0) == [("b", "/r", "sqlite"), ("a", "/r", "sqlite")]
+    assert explicit_resolver(reordered)(0.0) == [
+        (("b", "/r", "sqlite"), {}),
+        (("a", "/r", "sqlite"), {}),
+    ]
 
 
 def test_ref_key_distinguishes_same_basename_across_roots():
@@ -48,10 +67,11 @@ def test_glob_resolver_discovers_nested_db_files(tmp_path):
     (tmp_path / "a.db").write_text("")
     (tmp_path / "exp1" / "trial.db").write_text("")
     refs = glob_resolver(str(tmp_path))(0.0)
-    assert set(refs) == {
+    assert {r for r, _attrs in refs} == {
         ref_from_path(str(tmp_path / "a.db")),
         ref_from_path(str(tmp_path / "exp1" / "trial.db")),
     }
+    assert all(attrs == {} for _r, attrs in refs)  # glob is attribute-less
 
 
 def test_glob_resolver_is_live_reflecting_new_files(tmp_path):
@@ -60,7 +80,7 @@ def test_glob_resolver_is_live_reflecting_new_files(tmp_path):
     resolve = glob_resolver(str(tmp_path))
     assert resolve(0.0) == []
     (tmp_path / "new.db").write_text("")
-    assert [r[0] for r in resolve(1.0)] == ["new"]
+    assert [ref[0] for ref, _attrs in resolve(1.0)] == ["new"]
 
 
 def test_glob_resolver_is_symlink_cycle_safe(tmp_path):
@@ -75,7 +95,7 @@ def test_glob_resolver_is_symlink_cycle_safe(tmp_path):
     # Must RETURN (not hang) and NOT explode into sub/loop/sub/loop/... entries:
     # pathlib.rglob does not recurse into symlinked directories.
     refs = glob_resolver(str(tmp_path))(0.0)
-    assert sorted(r[0] for r in refs) == ["a", "b"]
+    assert sorted(ref[0] for ref, _attrs in refs) == ["a", "b"]
 
 
 def test_disambiguate_is_a_noop_when_stems_are_unique():
@@ -156,7 +176,85 @@ def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):
     os.symlink(ext_file, root / "latest.db")  # symlinked FILE -> matched
     os.symlink(ext_dir, root / "linked")  # symlinked DIR  -> NOT recursed
 
-    run_ids = sorted(r[0] for r in glob_resolver(str(root))(0.0))
+    run_ids = sorted(ref[0] for ref, _attrs in glob_resolver(str(root))(0.0))
     assert "local" in run_ids
     assert "latest" in run_ids  # symlinked file IS found
     assert "inside" not in run_ids  # run inside a symlinked dir is NOT (fail-safe gap)
+
+
+def _write_manifest(tmp_path, obj):
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps(obj))
+    return str(p)
+
+
+def test_manifest_resolver_reads_pairs(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(
+        tmp_path,
+        [
+            {
+                "run_id": "r1",
+                "root": "/x",
+                "backend": "sqlite",
+                "attrs": {"scenario": "s", "variant": "v"},
+            }
+        ],
+    )
+    assert manifest_resolver(path)(0.0) == [
+        (("r1", "/x", "sqlite"), {"scenario": "s", "variant": "v"})
+    ]
+
+
+def test_manifest_empty_list_is_empty(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    assert manifest_resolver(_write_manifest(tmp_path, []))(0.0) == []
+
+
+def test_manifest_missing_attrs_defaults_empty(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(tmp_path, [{"run_id": "r1", "root": "/x", "backend": "sqlite"}])
+    assert manifest_resolver(path)(0.0) == [(("r1", "/x", "sqlite"), {})]
+
+
+def test_manifest_malformed_json_raises(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not json")
+    with pytest.raises(json.JSONDecodeError):
+        manifest_resolver(str(p))(0.0)
+
+
+def test_manifest_missing_required_key_raises(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(tmp_path, [{"root": "/x", "backend": "sqlite"}])  # no run_id
+    with pytest.raises(KeyError):
+        manifest_resolver(path)(0.0)
+
+
+def test_manifest_non_list_top_level_raises(tmp_path):
+    # A JSON object (not an array) must RAISE at the boundary, not silently iterate zero keys
+    # and read as an empty manifest (which would masquerade as "no runs yet").
+    from runstate_tui.resolver import manifest_resolver
+
+    p = tmp_path / "obj.json"
+    p.write_text("{}")
+    with pytest.raises(TypeError):
+        manifest_resolver(str(p))(0.0)
+
+
+def test_manifest_non_string_attr_value_raises(tmp_path):
+    # attrs are Mapping[str, str] (display metadata). A non-string value must RAISE at the
+    # manifest boundary, not sail through and blow up later in _label's join on the main thread.
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(
+        tmp_path, [{"run_id": "r1", "root": "/x", "backend": "sqlite", "attrs": {"seed": 43}}]
+    )
+    with pytest.raises(TypeError):
+        manifest_resolver(path)(0.0)

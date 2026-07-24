@@ -1,0 +1,165 @@
+# Relational grouping for the multi-run table — design
+
+**Status:** design (2026-07-24). Un-deferred from `docs/backlog/multi-run-remainders.md` (which
+recorded the shape across PRs #20/#21) to dogfood through mycooc. Supersedes the "single group
+key / path-derived / deferred" framing there.
+
+**Goal:** let the multi-run table group and label rows by a per-row **relational attribute
+record** supplied by the resolver — never parsed from a path. First consumer: mycooc, which emits
+a neutral manifest describing its cells.
+
+## Non-goals (explicitly out)
+
+- **No FS/path-derived grouping.** Nothing parses attributes out of a directory path. "Grouping
+  should be possible" ≠ "grouping from the filesystem." `const`/`explicit`/`glob` keep returning
+  empty attrs → today's flat table.
+- **No data-plane metric columns / seed aggregation.** Multi-metric best-step tables and `mean±std`
+  are mycooc's `--status` domain / the separate viz project, not this.
+- **No TUI-side mycooc-schema adapter.** The reference TUI never reads mycooc's YAML or symlink
+  tree; mycooc emits a neutral relation instead.
+- **No runtime pivot in v1.** The group attribute is fixed at launch; cycling it with a keypress is
+  a named fast-follow.
+
+## Two data paths (the load-bearing separation)
+
+| | question | carried by | runstate? |
+|---|---|---|---|
+| **Discovery** | which runs exist, with what attrs? | the manifest file, read by the resolver | no |
+| **Observation** | what is *this* run doing? | each run's Channel (Values, lifecycle, …) | yes |
+
+Discovery is a level above the substrate — runstate is per-run and deliberately has no enumeration
+surface (the refused `list_runs()`). The manifest is the *index*; the channels are the *contents*.
+That is why the manifest is a plain file, not a message on the substrate.
+
+## Architecture
+
+### 1. Resolver signature carries attributes
+
+```
+Attrs    = Mapping[str, str]
+Resolver = Callable[[float], list[tuple[RunRef, Attrs]]]
+```
+
+`const`/`explicit`/`glob` return `attrs = {}` for every run → backward-neutral (empty attrs render
+exactly as today; no compat shim, just an extra empty field). Attrs are display metadata — strings,
+for grouping and labeling only.
+
+### 2. The manifest resolver (the generic attribute source)
+
+`manifest_resolver(path) -> Resolver`. Each tick it reads one JSON file:
+
+```json
+[
+  {"run_id": "7cfc…", "root": "outputs/runs/7c/7cfc…", "backend": "sqlite",
+   "attrs": {"scenario": "en-ru-16M", "variant": "fb_5k", "seed": "43"}}
+]
+```
+
+and returns `[(RunRef(run_id, root, backend), attrs), …]`. Re-read per frame (cheap) so cells
+appearing/disappearing track live. Any workload can emit this file; mycooc is the first producer; a
+hand-written fixture manifest exercises the whole feature with no mycooc present. (`root` is
+backend-specific — a path for sqlite, absent/ignored for a rootless backend like postgres.)
+
+**Invariant:** attrs are **row-unique** — they are the cell identity (see the reconcile key). The
+producer owns this; mycooc includes `seed`, so its cells are naturally unique.
+
+**Producer contract (atomic writes).** The emitter MUST write the manifest atomically — write a temp
+file, then `os.replace()` onto the path (atomic on POSIX) — never truncate-in-place, never
+unlink-then-write. This guarantees every read sees a *complete* file (the old one or the new one),
+never a partial. It is what makes a parse failure mean a real bug rather than a mid-rewrite race, and
+it is load-bearing for the crash-on-bad-manifest choice in §6.
+
+### 3. Grouping + labeling in the table
+
+Rendering stays a **single `DataTable`** — one cursor, and column widths aligned across the whole
+fleet:
+
+- **Group** by one chosen attribute (v1): rows are sorted by `(group value, label)` and each section
+  is introduced by a **non-interactive group-header row** (e.g. `── en-ru-16M ──` in the run column;
+  `enter` on it is a no-op). No `--group-by`, or empty attrs, → a single implicit group = today's flat
+  table, unchanged.
+- **Label** = the non-group attrs joined for display (e.g. `fb_5k seed43`). When attrs are empty the
+  label falls back to today's disambiguated `RunRef` label — unchanged behavior.
+
+The always-on global `#summary` strip is untouched.
+
+### 4. Reconcile key = the cell, not the run
+
+Row identity becomes the attrs record when non-empty, else the `RunRef` (today's key). Consequences:
+
+- Two cells sharing one run (same `RunRef`, different attrs) become **two distinct rows**. The LRU
+  channel pool already keys on `RunRef`, so both rows fold **one** shared open channel — no extra
+  I/O or fds.
+- The keyed `batch_update` reconcile in `multirun.py` swaps its key from `RunRef` to a
+  `row_key(ref, attrs)` function. **This is the only non-additive change**; fold, pool, and the
+  summary strip are untouched.
+- Drill-down (`enter`) maps the selected row → its `RunRef` (cached from the last frame, per the
+  existing M1 pattern), so a shared run opens correctly from either row.
+- A manifest entry whose run is gone (stale rid) → `attach_channel` raises `RunNotFound` → the
+  existing fold yields a `missing`/`unreadable` row. No new handling; no crash.
+
+### 5. CLI / dispatch
+
+`runstate-tui <manifest>.json [--group-by <attr>]`:
+
+- Dispatch by argument shape, same as the existing `.db`-file / directory branches: a `.json` file →
+  `manifest_resolver`.
+- `--group-by <attr>` selects the grouping attribute. Omitted → flat table with attr-labels.
+- A valid-but-empty manifest (`[]`) → the existing zero-match placeholder (`empty_hint`, e.g.
+  "watching &lt;manifest&gt; — no runs yet"). A *missing* manifest path at launch is a usage error
+  (refuse to start), not a placeholder; a *malformed* manifest crashes per §6.
+
+### 6. Error handling: crash on a bad manifest (v1), no reader-side robustness
+
+A malformed manifest **crashes the cockpit loudly** — and this needs *no code*: a parse failure in
+the resolver already propagates through `_fold_frame`'s catastrophic-raise path (`multirun.py:170-176`)
+→ the loop stops and `exit_on_error` (default `True`) surfaces the traceback. We deliberately add
+**no** reader-side retry, last-good, or degraded banner.
+
+This is fail-fast, not fragility, **because of the §2 atomic-write contract**: with atomic
+`os.replace` writes the reader can never see a torn/partial file, so the only way to get a parse
+failure is a genuinely malformed manifest — an emitter bug, which during dogfooding (you own both
+sides) is exactly what you want surfaced immediately, and which will not recur spuriously. This is the
+same logic as runstate's crash-on-torn: crashing on a torn read is correct precisely when the
+substrate guarantees complete reads (sqlite's committed-rows-only; here, atomic-replace). Without the
+atomic-write contract, crashing would instead fire on every mid-rewrite race — a category error — so
+the contract is load-bearing, not optional.
+
+- **Per-run open failures** (a manifest entry whose run is gone) → already handled by the fold (§4),
+  rendered as `missing` / `unreadable`. Not a manifest error.
+
+**Deferred robustness (keep-last-good).** A stateful resolver that returns the last good list and
+loudly surfaces `⚠ manifest unreadable — showing last good (N cells, frozen HH:MM:SS)` is the natural
+next step — but only once there is a concrete need: a manifest from a producer you **cannot** fix on
+the spot (a remote/shared emitter, or a consumer who is not the manifest's author). Until then, crash
++ fix-the-emitter is simpler and strictly more informative. That trigger is the "someone needs it"
+signal; build it then, not now.
+
+## mycooc side (separate repo change)
+
+mycooc already computes `(run → {scenario, variant, seed})` for `--status`. Add a small emit step
+(`--emit-manifest <path>`, or fold it into `--status`) that writes the JSON in §2 and rewrites it
+when the cell set changes. No TUI coupling; mycooc owns its schema→manifest mapping. This is the
+dogfood on the producer side, tracked in mycooc's own repo — out of scope for this plan except as
+the format contract in §2.
+
+## Testing
+
+- **manifest_resolver**: fixture manifests → returns the expected `[(RunRef, attrs)]`; a
+  valid-but-empty manifest → empty list; a **malformed** manifest → raises (asserting the crash
+  contract of §6), *not* silently tolerated.
+- **grouping render**: a 2-group manifest with `--group-by` → rows in two sections separated by
+  group-header rows, sorted by (group, label); an empty-attrs manifest (or no `--group-by`) → flat
+  table (regression-neutral vs today).
+- **shared run**: two entries with the same `RunRef`, different attrs → two rows, one pooled channel.
+- **snapshot**: a grouped-table scene added to the showcase, verified by rendering + looking (the
+  standing discipline).
+
+## Seams left open (not built now)
+
+- **Multi-attr / tuple grouping and runtime pivot** — the signature already carries all attrs; v1
+  just fixes one group attribute at launch.
+- **attrs from other populators** — e.g. a future `attrs-from-log` fold of a run's config record;
+  the resolver signature already accommodates it.
+- **Daemon push discovery** — replacing per-tick file re-reads with pushed updates; same discovery
+  role, different transport (relates to upstream runstate #16).

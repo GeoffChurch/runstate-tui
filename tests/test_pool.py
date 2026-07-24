@@ -18,12 +18,17 @@ def _seed(tmp_path, run_id, t=100.0):
     return (run_id, str(tmp_path), "sqlite")
 
 
+def _rows(table):
+    """Extract the ref->Row map from a fold_frame table of (ref, attrs, row) triples."""
+    return {ref: row for ref, _attrs, row in table}
+
+
 def test_fold_frame_row_equals_render_single(tmp_path):
     ref = _seed(tmp_path, "r")
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=8)
-    table = fold_frame(pool, [ref], env, 150.0)
-    assert dict(table)[ref] == render_single(ref, env)  # the §11 singleton, through the pool
+    table = fold_frame(pool, [(ref, {})], env, 150.0)
+    assert _rows(table)[ref] == render_single(ref, env)  # the §11 singleton, through the pool
     pool.close_all()
 
 
@@ -37,9 +42,10 @@ def test_fold_frame_distinguishes_same_basename_across_roots(tmp_path):
     ra = _seed(a_dir, "run1", t=100.0)
     rb = _seed(b_dir, "run1", t=200.0)
     pool = ChannelPool(cap=8)
-    table = fold_frame(pool, [ra, rb], Env(clock=lambda: 300.0), 300.0)
+    table = fold_frame(pool, [(ra, {}), (rb, {})], Env(clock=lambda: 300.0), 300.0)
     assert len(table) == 2 and len(pool) == 2  # two distinct runs, two channels
-    assert dict(table)[ra].elapsed == 200.0 and dict(table)[rb].elapsed == 100.0
+    rows = _rows(table)
+    assert rows[ra].elapsed == 200.0 and rows[rb].elapsed == 100.0
     pool.close_all()
 
 
@@ -49,7 +55,7 @@ def test_fold_frame_one_corrupt_run_does_not_sink_the_others(tmp_path):
     corrupt_seq(tmp_path, "bad", 1, literal="{not json")
     bad = ("bad", str(tmp_path), "sqlite")
     pool = ChannelPool(cap=8)
-    table = dict(fold_frame(pool, [good, bad], Env(clock=lambda: 150.0), 150.0))
+    table = _rows(fold_frame(pool, [(good, {}), (bad, {})], Env(clock=lambda: 150.0), 150.0))
     assert table[good].status.kind is not StatusKind.CORRUPT
     assert table[bad].status.kind is StatusKind.CORRUPT  # contained
     assert bad not in [r for r in pool._open]  # bad handle evicted; re-detected next tick
@@ -73,7 +79,7 @@ def test_fold_frame_contains_one_runs_unexpected_fold_error(tmp_path, monkeypatc
         return real_row_for(self, ref, frame_env)
 
     monkeypatch.setattr(ChannelPool, "row_for", flaky_row_for)
-    table = dict(fold_frame(pool, [good, bad], env, 150.0))  # must NOT raise -- fold_frame is total
+    table = _rows(fold_frame(pool, [(good, {}), (bad, {})], env, 150.0))  # must NOT raise -- total
     assert table[bad].status.kind is StatusKind.ERROR  # a distinct, loud fold-error row
     assert table[bad].severity is Severity.HIGH
     assert "RuntimeError" in (table[bad].status.detail or "")  # the exception rides the detail
@@ -86,9 +92,9 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
     refs = [_seed(tmp_path, f"r{i}") for i in range(3)]
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=2)
-    fold_frame(pool, [refs[0]], env, 150.0)  # open r0 alone
+    fold_frame(pool, [(refs[0], {})], env, 150.0)  # open r0 alone
     ch0 = pool._open[refs[0]]  # capture its handle
-    fold_frame(pool, refs, env, 151.0)  # r0 is the LRU -> evicted + closed
+    fold_frame(pool, [(r, {}) for r in refs], env, 151.0)  # r0 is the LRU -> evicted + closed
     assert len(pool) <= 2  # LRU kept the pool bounded
     with pytest.raises(sqlite3.ProgrammingError):
         ch0.read(after=0)  # evicted handle was actually closed
@@ -106,10 +112,10 @@ def test_row_for_evicts_a_pooled_run_whose_db_file_vanishes(tmp_path):
     ref = _seed(tmp_path, "a")
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=8)
-    fold_frame(pool, [ref], env, 150.0)  # first fold: opens + pools the channel
+    fold_frame(pool, [(ref, {})], env, 150.0)  # first fold: opens + pools the channel
     assert ref in pool._open
     (Path(tmp_path) / "a.db").unlink()
-    table = dict(fold_frame(pool, [ref], env, 151.0))  # second fold: stat finds it gone
+    table = _rows(fold_frame(pool, [(ref, {})], env, 151.0))  # second fold: stat finds it gone
     assert table[ref].status.kind is StatusKind.MISSING
     assert ref not in pool._open  # evicted, not left dangling in the pool
     pool.close_all()
@@ -120,10 +126,10 @@ def test_reconcile_closes_runs_that_left_the_resolver(tmp_path):
     b = _seed(tmp_path, "b")
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=8)
-    fold_frame(pool, [a, b], env, 150.0)
+    fold_frame(pool, [(a, {}), (b, {})], env, 150.0)
     assert len(pool) == 2
     ch_b = pool._open[b]  # capture b's handle
-    fold_frame(pool, [a], env, 151.0)
+    fold_frame(pool, [(a, {})], env, 151.0)
     assert len(pool) == 1  # b dropped + closed
     with pytest.raises(sqlite3.ProgrammingError):
         ch_b.read(after=0)  # b's handle was actually closed

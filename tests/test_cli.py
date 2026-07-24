@@ -21,7 +21,7 @@ def test_two_paths_construct_multirun(monkeypatch, tmp_path):
     b = str(tmp_path / "b.db")
     m.main([a, b])
     assert "multi" in made
-    assert made["refs"] == [ref_from_path(a), ref_from_path(b)]
+    assert made["refs"] == [(ref_from_path(a), {}), (ref_from_path(b), {})]
 
 
 def test_one_path_still_constructs_single(monkeypatch, tmp_path):
@@ -55,7 +55,7 @@ def test_directory_argument_constructs_multirun_with_glob(monkeypatch, tmp_path)
     (tmp_path / "exp1" / "trial.db").write_text("")
     m.main([str(tmp_path)])
     assert "multi" in made
-    assert set(made["refs"]) == {
+    assert {r for r, _attrs in made["refs"]} == {
         ref_from_path(str(tmp_path / "a.db")),
         ref_from_path(str(tmp_path / "exp1" / "trial.db")),
     }
@@ -73,3 +73,61 @@ def test_single_db_file_still_constructs_single(monkeypatch, tmp_path):
     f.write_text("")
     m.main([str(f)])
     assert "single" in made
+
+
+def test_json_manifest_constructs_multirun_with_group_by(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+
+    def fake_run(self):
+        made["multi"] = self
+        made["items"] = self._resolver(0.0)  # prove main() wired the manifest resolver
+
+    monkeypatch.setattr(m.MultiRunApp, "run", fake_run)
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "run_id": "r1",
+                    "root": "/x",
+                    "backend": "sqlite",
+                    "attrs": {"scenario": "s", "variant": "v"},
+                }
+            ]
+        )
+    )
+    m.main([str(manifest), "--group-by", "scenario"])
+    assert made["multi"]._group_by == "scenario"
+    assert made["items"] == [(("r1", "/x", "sqlite"), {"scenario": "s", "variant": "v"})]
+    assert made["multi"]._empty_hint is not None  # manifest mode wires a placeholder hint
+
+
+def test_json_manifest_without_group_by_is_flat(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(json.dumps([]))
+    m.main([str(manifest)])
+    assert made["multi"]._group_by is None
+
+
+def test_missing_json_manifest_is_a_usage_error(monkeypatch, tmp_path):
+    # spec §5: a missing manifest path is a usage error (refuse to start), NOT a phantom
+    # SingleRunApp over a nonexistent run. A .json suffix routes to the manifest branch
+    # regardless of existence; a nonexistent one returns 2 and constructs no app.
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    rc = m.main([str(tmp_path / "nope.json")])
+    assert rc == 2
+    assert made == {}  # neither app constructed nor run

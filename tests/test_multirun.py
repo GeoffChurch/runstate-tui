@@ -71,7 +71,9 @@ async def _preserves_selected_row_key_across_reorder(tmp_path):
     c = _seed(tmp_path, "c")
     d = _seed(tmp_path, "d")
     live = {"refs": [b, c, d]}
-    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(
+        lambda now: [(r, {}) for r in live["refs"]], Env(clock=lambda: 150.0), tick_interval=999
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -103,7 +105,9 @@ async def _shrinking_resolver_removes_the_row(tmp_path):
     a = _seed(tmp_path, "a")
     b = _seed(tmp_path, "b")
     live = {"refs": [a, b]}
-    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(
+        lambda now: [(r, {}) for r in live["refs"]], Env(clock=lambda: 150.0), tick_interval=999
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -125,7 +129,7 @@ async def _duplicate_ref_yields_one_row(tmp_path):
     # reconcile must add a's row once and UPDATE (not re-add) on the duplicate, never
     # raising DuplicateKey. Bypass explicit_resolver (which dedups) with a raw lambda.
     a = _seed(tmp_path, "a")
-    app = MultiRunApp(lambda now: [a, a], Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(lambda now: [(a, {}), (a, {})], Env(clock=lambda: 150.0), tick_interval=999)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -517,7 +521,7 @@ async def _zero_match_shows_placeholder_then_swaps(tmp_path):
     # table; when a run appears, the placeholder hides and the table shows.
     live = {"refs": []}
     app = MultiRunApp(
-        lambda now: list(live["refs"]),
+        lambda now: [(r, {}) for r in live["refs"]],
         Env(clock=lambda: 150.0),
         tick_interval=999,
         empty_hint="watching /runs/**/*.db — no runs yet",
@@ -545,7 +549,9 @@ async def _no_empty_hint_never_shows_placeholder(tmp_path):
     # explicit/single mode passes no empty_hint: even a (degenerate) empty frame must not
     # pop a placeholder -- the table stays the shown widget.
     live = {"refs": [_seed(tmp_path, "a")]}
-    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(
+        lambda now: [(r, {}) for r in live["refs"]], Env(clock=lambda: 150.0), tick_interval=999
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -573,7 +579,7 @@ async def _enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
 
     def resolver(now):
         calls["n"] += 1
-        return [a] if calls["n"] <= 1 else []
+        return [(a, {})] if calls["n"] <= 1 else []
 
     app = MultiRunApp(resolver, Env(clock=lambda: 150.0), tick_interval=999)
     async with app.run_test() as pilot:
@@ -614,7 +620,7 @@ async def _summary_hidden_when_no_runs_then_swaps_in(tmp_path):
     # a glob-empty frame: #empty owns the screen, #summary is hidden; a run appearing swaps.
     live = {"refs": []}
     app = MultiRunApp(
-        lambda now: list(live["refs"]),
+        lambda now: [(r, {}) for r in live["refs"]],
         Env(clock=lambda: 150.0),
         tick_interval=999,
         empty_hint="watching /runs/**/*.db — no runs yet",
@@ -631,3 +637,115 @@ async def _summary_hidden_when_no_runs_then_swaps_in(tmp_path):
         await pilot.pause()
         assert summary.display  # a run appeared -> shown
         assert "live 1" in str(summary.content)
+
+
+def test_cell_is_keyed_and_labeled_by_attrs(tmp_path):
+    asyncio.run(_cell_keyed_and_labeled(tmp_path))
+
+
+async def _cell_keyed_and_labeled(tmp_path):
+    # A resolver that supplies attrs: the row is keyed by the CELL (its attrs), and the run
+    # column shows the attrs joined (not the disambiguated stem).
+    from runstate_tui.multirun import row_key
+
+    ref = _seed(tmp_path, "r1")
+    attrs = {"scenario": "s", "variant": "v"}
+    app = MultiRunApp(lambda now: [(ref, attrs)], Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        key = row_key(ref, attrs)
+        assert {k.value for k in t.rows.keys()} == {key}
+        assert t.get_cell(key, "run") == "s v"  # non-group attrs joined (sorted by key)
+
+
+def test_two_cells_sharing_one_run_are_two_rows_one_channel(tmp_path):
+    asyncio.run(_shared_run_two_rows(tmp_path))
+
+
+async def _shared_run_two_rows(tmp_path):
+    # The run-sharing the design is built for: two cells (distinct attrs) over ONE RunRef ->
+    # two distinct rows, but the pool keys on RunRef so they fold ONE shared open channel.
+    ref = _seed(tmp_path, "r1")
+    items = [(ref, {"cell": "A"}), (ref, {"cell": "B"})]
+    app = MultiRunApp(lambda now: items, Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.row_count == 2  # two distinct cell rows
+        assert len(app._pool) == 1  # ...over ONE pooled channel
+
+
+def test_grouping_renders_sections_in_order(tmp_path):
+    asyncio.run(_grouping_sections(tmp_path))
+
+
+async def _grouping_sections(tmp_path):
+    # group_by="scenario": groups ascending; within a group the header row first, then rows by
+    # label ascending. Rows come in a deliberately-unsorted order to prove the ordering.
+    r1, r2, r3 = _seed(tmp_path, "r1"), _seed(tmp_path, "r2"), _seed(tmp_path, "r3")
+    items = [
+        (r2, {"scenario": "beta", "variant": "v1"}),
+        (r1, {"scenario": "alpha", "variant": "v2"}),
+        (r3, {"scenario": "alpha", "variant": "v1"}),
+    ]
+    app = MultiRunApp(
+        lambda now: items, Env(clock=lambda: 150.0), tick_interval=999, group_by="scenario"
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        order = [t.get_row_at(i)[1] for i in range(t.row_count)]  # the 'run' column, top to bottom
+        assert order == ["── alpha ──", "v1", "v2", "── beta ──", "v1"]
+
+
+def test_enter_on_header_row_is_a_noop(tmp_path):
+    asyncio.run(_enter_header_noop(tmp_path))
+
+
+async def _enter_header_noop(tmp_path):
+    r1 = _seed(tmp_path, "r1")
+    app = MultiRunApp(
+        lambda now: [(r1, {"scenario": "a", "variant": "v"})],
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        group_by="scenario",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        t.move_cursor(row=0)  # the "── a ──" header row (groups first)
+        assert t.get_row_at(0)[1] == "── a ──"  # confirm the cursor is on the header
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, DrillDownScreen)  # a header opens nothing
+
+
+def test_grouping_survives_a_duplicate_row_key(tmp_path):
+    asyncio.run(_grouping_dup_key(tmp_path))
+
+
+async def _grouping_dup_key(tmp_path):
+    # A manifest can repeat an attrs record (or hand back a non-deduped shared RunRef), so two
+    # items collapse to ONE row_key. row_key's contract is last-wins, NOT a crash (flat mode
+    # honors it). Grouped mode must too: the reorder must not list the shared key twice, which
+    # would gap _row_locations and crash the next paint with RowDoesNotExist. Reading every row
+    # (get_row_at) drives exactly that render path.
+    r1 = _seed(tmp_path, "r1")
+    dup = {"scenario": "s", "variant": "v"}
+    app = MultiRunApp(
+        lambda now: [(r1, dup), (r1, dup)],  # identical attrs -> identical row_key
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        group_by="scenario",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        order = [t.get_row_at(i)[1] for i in range(t.row_count)]  # no gap -> no RowDoesNotExist
+        assert order == ["── s ──", "v"]  # one header + the single collapsed data row
