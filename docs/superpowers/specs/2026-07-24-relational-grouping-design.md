@@ -71,12 +71,17 @@ it is load-bearing for the crash-on-bad-manifest choice in §6.
 
 ### 3. Grouping + labeling in the table
 
-- **Group** by one chosen attribute (v1): the table renders one section per distinct value of that
-  attribute, each section headed by a per-group `format_fleet_summary` roll-up (the shipped strip,
-  computed per-section instead of once globally). Runs with empty attrs, or when no `--group-by` is
-  given, form a single implicit group = today's flat table.
+Rendering stays a **single `DataTable`** — one cursor, and column widths aligned across the whole
+fleet:
+
+- **Group** by one chosen attribute (v1): rows are sorted by `(group value, label)` and each section
+  is introduced by a **non-interactive group-header row** (e.g. `── en-ru-16M ──` in the run column;
+  `enter` on it is a no-op). No `--group-by`, or empty attrs, → a single implicit group = today's flat
+  table, unchanged.
 - **Label** = the non-group attrs joined for display (e.g. `fb_5k seed43`). When attrs are empty the
   label falls back to today's disambiguated `RunRef` label — unchanged behavior.
+
+The always-on global `#summary` strip is untouched.
 
 ### 4. Reconcile key = the cell, not the run
 
@@ -143,8 +148,9 @@ the format contract in §2.
 - **manifest_resolver**: fixture manifests → returns the expected `[(RunRef, attrs)]`; a
   valid-but-empty manifest → empty list; a **malformed** manifest → raises (asserting the crash
   contract of §6), *not* silently tolerated.
-- **grouping render**: a 2-group manifest → 2 sections, each with its own roll-up header; an
-  empty-attrs manifest → flat table (regression-neutral vs today).
+- **grouping render**: a 2-group manifest with `--group-by` → rows in two sections separated by
+  group-header rows, sorted by (group, label); an empty-attrs manifest (or no `--group-by`) → flat
+  table (regression-neutral vs today).
 - **shared run**: two entries with the same `RunRef`, different attrs → two rows, one pooled channel.
 - **snapshot**: a grouped-table scene added to the showcase, verified by rendering + looking (the
   standing discipline).
