@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -52,6 +53,23 @@ def glob_resolver(root: str) -> Resolver:
         # explicit_resolver, whose CLI args can legitimately repeat, glob has no dup source.
         # Attribute-less: paired with empty attrs (the label comes from `disambiguate`).
         return [(ref_from_path(str(p)), {}) for p in root_path.rglob("*.db")]
+
+    return resolve
+
+
+def manifest_resolver(path: str) -> Resolver:
+    """A LIVE resolver over a neutral JSON manifest -- the discovery INDEX (the per-run channels are
+    the contents). Each frame it re-reads `path` and returns one (RunRef, attrs) per entry
+    (`{"run_id", "root", "backend", "attrs": {...}}`; `attrs` optional -> {}). It deliberately does
+    NOT tolerate a bad read: a malformed manifest RAISES, crashing the cockpit via the owner
+    thread's catastrophic path -- correct because the atomic-write contract (spec §2) guarantees a
+    read never sees a torn file, so a parse failure is a real emitter bug, not a mid-rewrite race
+    (spec §6). keep-last-good robustness is deferred until a producer we cannot fix on the spot."""
+    manifest_path = Path(path)
+
+    def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
+        entries = json.loads(manifest_path.read_text())
+        return [((e["run_id"], e["root"], e["backend"]), dict(e.get("attrs", {}))) for e in entries]
 
     return resolve
 

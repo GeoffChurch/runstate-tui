@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from runstate_tui.resolver import const_resolver, ref_from_path
 
 
@@ -176,3 +180,58 @@ def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):
     assert "local" in run_ids
     assert "latest" in run_ids  # symlinked file IS found
     assert "inside" not in run_ids  # run inside a symlinked dir is NOT (fail-safe gap)
+
+
+def _write_manifest(tmp_path, obj):
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps(obj))
+    return str(p)
+
+
+def test_manifest_resolver_reads_pairs(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(
+        tmp_path,
+        [
+            {
+                "run_id": "r1",
+                "root": "/x",
+                "backend": "sqlite",
+                "attrs": {"scenario": "s", "variant": "v"},
+            }
+        ],
+    )
+    assert manifest_resolver(path)(0.0) == [
+        (("r1", "/x", "sqlite"), {"scenario": "s", "variant": "v"})
+    ]
+
+
+def test_manifest_empty_list_is_empty(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    assert manifest_resolver(_write_manifest(tmp_path, []))(0.0) == []
+
+
+def test_manifest_missing_attrs_defaults_empty(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(tmp_path, [{"run_id": "r1", "root": "/x", "backend": "sqlite"}])
+    assert manifest_resolver(path)(0.0) == [(("r1", "/x", "sqlite"), {})]
+
+
+def test_manifest_malformed_json_raises(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not json")
+    with pytest.raises(json.JSONDecodeError):
+        manifest_resolver(str(p))(0.0)
+
+
+def test_manifest_missing_required_key_raises(tmp_path):
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(tmp_path, [{"root": "/x", "backend": "sqlite"}])  # no run_id
+    with pytest.raises(KeyError):
+        manifest_resolver(path)(0.0)
