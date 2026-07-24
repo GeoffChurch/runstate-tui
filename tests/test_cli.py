@@ -73,3 +73,47 @@ def test_single_db_file_still_constructs_single(monkeypatch, tmp_path):
     f.write_text("")
     m.main([str(f)])
     assert "single" in made
+
+
+def test_json_manifest_constructs_multirun_with_group_by(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+
+    def fake_run(self):
+        made["multi"] = self
+        made["items"] = self._resolver(0.0)  # prove main() wired the manifest resolver
+
+    monkeypatch.setattr(m.MultiRunApp, "run", fake_run)
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "run_id": "r1",
+                    "root": "/x",
+                    "backend": "sqlite",
+                    "attrs": {"scenario": "s", "variant": "v"},
+                }
+            ]
+        )
+    )
+    m.main([str(manifest), "--group-by", "scenario"])
+    assert made["multi"]._group_by == "scenario"
+    assert made["items"] == [(("r1", "/x", "sqlite"), {"scenario": "s", "variant": "v"})]
+    assert made["multi"]._empty_hint is not None  # manifest mode wires a placeholder hint
+
+
+def test_json_manifest_without_group_by_is_flat(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(json.dumps([]))
+    m.main([str(manifest)])
+    assert made["multi"]._group_by is None
