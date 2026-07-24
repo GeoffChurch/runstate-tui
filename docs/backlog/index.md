@@ -20,6 +20,10 @@ source of truth.)
   Drops onto the shipped `MultiRunApp` / resolver seams.
 - [cli](cli.md) — the CLI shape-dispatch + the argparse flag layer (`--group-by`, `CliArgs`); deferred
   **subcommands** if the shape-guessing (dir vs `.json` vs `.db`) ever turns ambiguous.
+- [value-trend](value-trend.md) — a lightweight in-terminal value/progress trend, and an on-demand
+  full trajectory in the drill-down. The control-vs-visualization separation was relaxed from a law to
+  a stance (owner, 2026-07-24); the feature is gated by the **scale seam** (cheap ring-buffer trend
+  per-frame; O(N) `value_series` replay only on demand, one run at a time), not by philosophy.
 - [liveness-overlay](liveness-overlay.md) — external liveness probes (`os.kill` same-host;
   `squeue`/`kubectl` cross-host). Seam committed in the core spec §2.1/§14.2; core is
   freshness-only. **Also the home of log-level `conflicted`** (2026-07-18 red-team: a reliable
