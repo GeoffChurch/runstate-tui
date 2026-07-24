@@ -185,9 +185,9 @@ class MultiRunApp(App[None]):
     def on_table_ready(self, msg: TableReady) -> None:  # MAIN thread: keyed reconcile
         self._last_ready = self._env.clock()
         t = self.query_one("#runs", DataTable)
-        want = {ref_key(ref) for ref, _ in msg.table}
-        labels = disambiguate([ref for ref, _ in msg.table])
-        self._refs_by_key = {ref_key(ref): ref for ref, _ in msg.table}
+        want = {ref_key(ref) for ref, _attrs, _row in msg.table}
+        labels = disambiguate([ref for ref, _attrs, _row in msg.table])
+        self._refs_by_key = {ref_key(ref): ref for ref, _attrs, _row in msg.table}
         sel = None
         if t.row_count:
             sel = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
@@ -200,7 +200,7 @@ class MultiRunApp(App[None]):
                 if key not in want:
                     t.remove_row(key)
             present &= want
-            for ref, row in msg.table:
+            for ref, _attrs, row in msg.table:
                 key = ref_key(ref)
                 cells = _cells(row, labels[key])
                 if key in present:
@@ -226,7 +226,7 @@ class MultiRunApp(App[None]):
             empty.display = False
             t.display = True
             if want:
-                summary.update(format_fleet_summary([row for _, row in msg.table]))
+                summary.update(format_fleet_summary([row for _ref, _attrs, row in msg.table]))
                 summary.display = True
             else:
                 summary.display = False

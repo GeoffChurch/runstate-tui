@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
-Resolver = Callable[[float], list[RunRef]]  # Time -> IndexSet (re-resolved each frame)
+Attrs = Mapping[str, str]  # per-row relational metadata — grouping + labeling ONLY (no fold input)
+Resolver = Callable[
+    [float], list[tuple[RunRef, Attrs]]
+]  # Time -> [(ref, attrs)] (re-resolved each frame)
 
 
 def const_resolver(ref: RunRef) -> Resolver:
-    """The singleton resolver: always exactly `[ref]`. The single-run view is the
+    """The singleton resolver: always exactly `[(ref, {})]`. The single-run view is the
     table taken over this (spec §1: single-run = table at |I|=1)."""
-    return lambda now: [ref]
+    return lambda now: [(ref, {})]
 
 
 def ref_from_path(path: str) -> RunRef:
@@ -23,18 +26,19 @@ def explicit_resolver(refs: list[RunRef]) -> Resolver:
     """A fixed IndexSet — the safe multi-run resolver: the refs it yields are opened
     via `attach_channel`, which never creates, so resolving a stale/foreign pointer
     can't fabricate or mutate a run. Exact duplicate refs are dropped (order preserved)
-    so each run is one pooled channel and one DataTable row."""
+    so each run is one pooled channel and one DataTable row. Attribute-less: every ref is
+    paired with empty attrs, so grouping/labeling fall back to the disambiguated stem."""
     snapshot = list(dict.fromkeys(refs))
 
-    def resolve(_now: float) -> list[RunRef]:
-        return list(snapshot)
+    def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
+        return [(r, {}) for r in snapshot]
 
     return resolve
 
 
 def glob_resolver(root: str) -> Resolver:
     """A LIVE resolver over a directory: each frame, discover every ``*.db`` run under
-    `root` (recursively) and return their RunRefs. Uses ``Path.rglob`` -- which does NOT
+    `root` (recursively) and return their (RunRef, {}) pairs. Uses ``Path.rglob`` -- which does NOT
     recurse into symlinked directories -- so a cyclic symlink can neither hang nor explode
     the scan (verified 2026-07-21). Matches open via ``attach_channel`` (never create), so
     a stale / foreign / half-written ``.db`` reads ``missing`` / ``unreadable`` and is left
@@ -42,11 +46,12 @@ def glob_resolver(root: str) -> Resolver:
     irrelevant: the table sorts on the (disambiguated) run column."""
     root_path = Path(root)
 
-    def resolve(_now: float) -> list[RunRef]:
+    def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
         # No dedup: rglob yields each path once and ref_from_path is injective over distinct
         # paths (a symlinked file and its target still have distinct paths). Unlike
         # explicit_resolver, whose CLI args can legitimately repeat, glob has no dup source.
-        return [ref_from_path(str(p)) for p in root_path.rglob("*.db")]
+        # Attribute-less: paired with empty attrs (the label comes from `disambiguate`).
+        return [(ref_from_path(str(p)), {}) for p in root_path.rglob("*.db")]
 
     return resolve
 

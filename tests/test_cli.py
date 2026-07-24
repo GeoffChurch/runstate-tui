@@ -21,7 +21,7 @@ def test_two_paths_construct_multirun(monkeypatch, tmp_path):
     b = str(tmp_path / "b.db")
     m.main([a, b])
     assert "multi" in made
-    assert made["refs"] == [ref_from_path(a), ref_from_path(b)]
+    assert made["refs"] == [(ref_from_path(a), {}), (ref_from_path(b), {})]
 
 
 def test_one_path_still_constructs_single(monkeypatch, tmp_path):
@@ -55,7 +55,7 @@ def test_directory_argument_constructs_multirun_with_glob(monkeypatch, tmp_path)
     (tmp_path / "exp1" / "trial.db").write_text("")
     m.main([str(tmp_path)])
     assert "multi" in made
-    assert set(made["refs"]) == {
+    assert {r for r, _attrs in made["refs"]} == {
         ref_from_path(str(tmp_path / "a.db")),
         ref_from_path(str(tmp_path / "exp1" / "trial.db")),
     }

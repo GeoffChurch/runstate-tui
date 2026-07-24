@@ -71,7 +71,9 @@ async def _preserves_selected_row_key_across_reorder(tmp_path):
     c = _seed(tmp_path, "c")
     d = _seed(tmp_path, "d")
     live = {"refs": [b, c, d]}
-    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(
+        lambda now: [(r, {}) for r in live["refs"]], Env(clock=lambda: 150.0), tick_interval=999
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -103,7 +105,9 @@ async def _shrinking_resolver_removes_the_row(tmp_path):
     a = _seed(tmp_path, "a")
     b = _seed(tmp_path, "b")
     live = {"refs": [a, b]}
-    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(
+        lambda now: [(r, {}) for r in live["refs"]], Env(clock=lambda: 150.0), tick_interval=999
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -125,7 +129,7 @@ async def _duplicate_ref_yields_one_row(tmp_path):
     # reconcile must add a's row once and UPDATE (not re-add) on the duplicate, never
     # raising DuplicateKey. Bypass explicit_resolver (which dedups) with a raw lambda.
     a = _seed(tmp_path, "a")
-    app = MultiRunApp(lambda now: [a, a], Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(lambda now: [(a, {}), (a, {})], Env(clock=lambda: 150.0), tick_interval=999)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -517,7 +521,7 @@ async def _zero_match_shows_placeholder_then_swaps(tmp_path):
     # table; when a run appears, the placeholder hides and the table shows.
     live = {"refs": []}
     app = MultiRunApp(
-        lambda now: list(live["refs"]),
+        lambda now: [(r, {}) for r in live["refs"]],
         Env(clock=lambda: 150.0),
         tick_interval=999,
         empty_hint="watching /runs/**/*.db — no runs yet",
@@ -545,7 +549,9 @@ async def _no_empty_hint_never_shows_placeholder(tmp_path):
     # explicit/single mode passes no empty_hint: even a (degenerate) empty frame must not
     # pop a placeholder -- the table stays the shown widget.
     live = {"refs": [_seed(tmp_path, "a")]}
-    app = MultiRunApp(lambda now: list(live["refs"]), Env(clock=lambda: 150.0), tick_interval=999)
+    app = MultiRunApp(
+        lambda now: [(r, {}) for r in live["refs"]], Env(clock=lambda: 150.0), tick_interval=999
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -573,7 +579,7 @@ async def _enter_opens_from_last_frame_not_a_fresh_resolve(tmp_path):
 
     def resolver(now):
         calls["n"] += 1
-        return [a] if calls["n"] <= 1 else []
+        return [(a, {})] if calls["n"] <= 1 else []
 
     app = MultiRunApp(resolver, Env(clock=lambda: 150.0), tick_interval=999)
     async with app.run_test() as pilot:
@@ -614,7 +620,7 @@ async def _summary_hidden_when_no_runs_then_swaps_in(tmp_path):
     # a glob-empty frame: #empty owns the screen, #summary is hidden; a run appearing swaps.
     live = {"refs": []}
     app = MultiRunApp(
-        lambda now: list(live["refs"]),
+        lambda now: [(r, {}) for r in live["refs"]],
         Env(clock=lambda: 150.0),
         tick_interval=999,
         empty_hint="watching /runs/**/*.db — no runs yet",

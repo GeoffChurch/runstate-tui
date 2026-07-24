@@ -178,7 +178,7 @@ def render_table(resolver: Resolver, env: Env) -> list[Row]:
     # `now` is re-sampled per row (once for the resolver, then again in each row's
     # status_fold) — Stage 4 should capture `now` once per frame for frame-consistent
     # freshness across the whole table.
-    return [open_and_fold(ref, env) for ref in resolver(env.clock())]
+    return [open_and_fold(ref, env) for ref, _attrs in resolver(env.clock())]
 
 
 def render_single(ref: RunRef, env: Env) -> Row:
