@@ -63,6 +63,12 @@ backend-specific — a path for sqlite, absent/ignored for a rootless backend li
 **Invariant:** attrs are **row-unique** — they are the cell identity (see the reconcile key). The
 producer owns this; mycooc includes `seed`, so its cells are naturally unique.
 
+**Producer contract (atomic writes).** The emitter MUST write the manifest atomically — write a temp
+file, then `os.replace()` onto the path (atomic on POSIX) — never truncate-in-place, never
+unlink-then-write. This guarantees every read sees a *complete* file (the old one or the new one),
+never a partial. It is what makes a parse failure mean a real bug rather than a mid-rewrite race, and
+it is load-bearing for the crash-on-bad-manifest choice in §6.
+
 ### 3. Grouping + labeling in the table
 
 - **Group** by one chosen attribute (v1): the table renders one section per distinct value of that
@@ -94,18 +100,35 @@ Row identity becomes the attrs record when non-empty, else the `RunRef` (today's
 - Dispatch by argument shape, same as the existing `.db`-file / directory branches: a `.json` file →
   `manifest_resolver`.
 - `--group-by <attr>` selects the grouping attribute. Omitted → flat table with attr-labels.
-- Missing/empty manifest at launch → the existing zero-match placeholder (`empty_hint`, e.g.
-  "watching &lt;manifest&gt; — no runs yet").
+- A valid-but-empty manifest (`[]`) → the existing zero-match placeholder (`empty_hint`, e.g.
+  "watching &lt;manifest&gt; — no runs yet"). A *missing* manifest path at launch is a usage error
+  (refuse to start), not a placeholder; a *malformed* manifest crashes per §6.
 
-### 6. Error handling (discovery path)
+### 6. Error handling: crash on a bad manifest (v1), no reader-side robustness
 
-Discovery is UI/control-flavored, not the fail-fast data plane:
+A malformed manifest **crashes the cockpit loudly** — and this needs *no code*: a parse failure in
+the resolver already propagates through `_fold_frame`'s catastrophic-raise path (`multirun.py:170-176`)
+→ the loop stops and `exit_on_error` (default `True`) surfaces the traceback. We deliberately add
+**no** reader-side retry, last-good, or degraded banner.
 
-- **Malformed / transiently-unreadable manifest on a tick** → keep the last good list, surface a
-  small indicator (reuse the `⚠ I/O stalled`-style main-thread marker); do not crash, do not flicker
-  to empty.
-- **Per-run open failures** → already handled by the fold (see §4), rendered as `missing` /
-  `unreadable`.
+This is fail-fast, not fragility, **because of the §2 atomic-write contract**: with atomic
+`os.replace` writes the reader can never see a torn/partial file, so the only way to get a parse
+failure is a genuinely malformed manifest — an emitter bug, which during dogfooding (you own both
+sides) is exactly what you want surfaced immediately, and which will not recur spuriously. This is the
+same logic as runstate's crash-on-torn: crashing on a torn read is correct precisely when the
+substrate guarantees complete reads (sqlite's committed-rows-only; here, atomic-replace). Without the
+atomic-write contract, crashing would instead fire on every mid-rewrite race — a category error — so
+the contract is load-bearing, not optional.
+
+- **Per-run open failures** (a manifest entry whose run is gone) → already handled by the fold (§4),
+  rendered as `missing` / `unreadable`. Not a manifest error.
+
+**Deferred robustness (keep-last-good).** A stateful resolver that returns the last good list and
+loudly surfaces `⚠ manifest unreadable — showing last good (N cells, frozen HH:MM:SS)` is the natural
+next step — but only once there is a concrete need: a manifest from a producer you **cannot** fix on
+the spot (a remote/shared emitter, or a consumer who is not the manifest's author). Until then, crash
++ fix-the-emitter is simpler and strictly more informative. That trigger is the "someone needs it"
+signal; build it then, not now.
 
 ## mycooc side (separate repo change)
 
@@ -117,8 +140,9 @@ the format contract in §2.
 
 ## Testing
 
-- **manifest_resolver**: fixture manifests → returns the expected `[(RunRef, attrs)]`; tolerates a
-  missing file (empty list) and a malformed file (last-good / empty, no raise).
+- **manifest_resolver**: fixture manifests → returns the expected `[(RunRef, attrs)]`; a
+  valid-but-empty manifest → empty list; a **malformed** manifest → raises (asserting the crash
+  contract of §6), *not* silently tolerated.
 - **grouping render**: a 2-group manifest → 2 sections, each with its own roll-up header; an
   empty-attrs manifest → flat table (regression-neutral vs today).
 - **shared run**: two entries with the same `RunRef`, different attrs → two rows, one pooled channel.
