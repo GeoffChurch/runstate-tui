@@ -13,7 +13,7 @@ from .detail import _TEARDOWN_ERRORS, DrillDownScreen
 from .env import Env
 from .format import format_fleet_summary, status_color
 from .pool import ChannelPool, Table, fold_frame
-from .resolver import Resolver, RunRef, disambiguate, ref_key
+from .resolver import Attrs, Resolver, RunRef, disambiguate, ref_key
 from .types import Row, Severity
 
 _COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
@@ -22,6 +22,25 @@ _COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
 # giving up and LEAKING the pool (see on_unmount) rather than hanging quit forever on a
 # wedged thread.
 _DRAIN_TIMEOUT = 5.0
+
+
+def row_key(ref: RunRef, attrs: Attrs) -> str:
+    """A row's identity is the CELL (its attrs), not the run: two cells sharing a run stay two
+    rows. Falls back to ``ref_key`` when attrs is empty (the attribute-less resolvers -> today's
+    keying). Invariant: attrs are row-unique (spec §2); a producer that repeats an attrs record
+    collapses to one row (last-wins) -- a documented producer bug, not a crash."""
+    if attrs:
+        return "\x00".join(f"{k}={v}" for k, v in sorted(attrs.items()))
+    return ref_key(ref)
+
+
+def _label(ref: RunRef, attrs: Attrs, group_by: str | None, disambig: dict[str, str]) -> str:
+    """The run-column label: the non-group attrs joined (e.g. ``fb_5k seed43``), else the
+    disambiguated stem when attrs is empty (or the group key was the only attr)."""
+    if attrs:
+        shown = " ".join(v for k, v in sorted(attrs.items()) if k != group_by)
+        return shown or disambig[ref_key(ref)]
+    return disambig[ref_key(ref)]
 
 
 def _marker(row: Row) -> Text:
@@ -85,11 +104,13 @@ class MultiRunApp(App[None]):
         pool_cap: int = 128,
         stall_ticks: int = 3,
         empty_hint: str | None = None,
+        group_by: str | None = None,
     ) -> None:
         super().__init__()
         self._resolver = resolver
         self._env = env
         self._empty_hint = empty_hint
+        self._group_by = group_by  # attr to section the table by; None -> flat
         # The last delivered frame's key->ref map. action_detail resolves the selected row
         # from THIS (main-thread, already-displayed) snapshot -- never by re-running the
         # resolver on the render thread, which for a glob resolver is a full rglob disk walk.
@@ -185,9 +206,9 @@ class MultiRunApp(App[None]):
     def on_table_ready(self, msg: TableReady) -> None:  # MAIN thread: keyed reconcile
         self._last_ready = self._env.clock()
         t = self.query_one("#runs", DataTable)
-        want = {ref_key(ref) for ref, _attrs, _row in msg.table}
+        want = {row_key(ref, attrs) for ref, attrs, _row in msg.table}
         labels = disambiguate([ref for ref, _attrs, _row in msg.table])
-        self._refs_by_key = {ref_key(ref): ref for ref, _attrs, _row in msg.table}
+        self._refs_by_key = {row_key(ref, attrs): ref for ref, attrs, _row in msg.table}
         sel = None
         if t.row_count:
             sel = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
@@ -200,9 +221,9 @@ class MultiRunApp(App[None]):
                 if key not in want:
                     t.remove_row(key)
             present &= want
-            for ref, _attrs, row in msg.table:
-                key = ref_key(ref)
-                cells = _cells(row, labels[key])
+            for ref, attrs, row in msg.table:
+                key = row_key(ref, attrs)
+                cells = _cells(row, _label(ref, attrs, self._group_by, labels))
                 if key in present:
                     for col, val in zip(_COLUMNS, cells, strict=True):
                         t.update_cell(key, col, val)

@@ -637,3 +637,42 @@ async def _summary_hidden_when_no_runs_then_swaps_in(tmp_path):
         await pilot.pause()
         assert summary.display  # a run appeared -> shown
         assert "live 1" in str(summary.content)
+
+
+def test_cell_is_keyed_and_labeled_by_attrs(tmp_path):
+    asyncio.run(_cell_keyed_and_labeled(tmp_path))
+
+
+async def _cell_keyed_and_labeled(tmp_path):
+    # A resolver that supplies attrs: the row is keyed by the CELL (its attrs), and the run
+    # column shows the attrs joined (not the disambiguated stem).
+    from runstate_tui.multirun import row_key
+
+    ref = _seed(tmp_path, "r1")
+    attrs = {"scenario": "s", "variant": "v"}
+    app = MultiRunApp(lambda now: [(ref, attrs)], Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        key = row_key(ref, attrs)
+        assert {k.value for k in t.rows.keys()} == {key}
+        assert t.get_cell(key, "run") == "s v"  # non-group attrs joined (sorted by key)
+
+
+def test_two_cells_sharing_one_run_are_two_rows_one_channel(tmp_path):
+    asyncio.run(_shared_run_two_rows(tmp_path))
+
+
+async def _shared_run_two_rows(tmp_path):
+    # The run-sharing the design is built for: two cells (distinct attrs) over ONE RunRef ->
+    # two distinct rows, but the pool keys on RunRef so they fold ONE shared open channel.
+    ref = _seed(tmp_path, "r1")
+    items = [(ref, {"cell": "A"}), (ref, {"cell": "B"})]
+    app = MultiRunApp(lambda now: items, Env(clock=lambda: 150.0), tick_interval=999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        assert t.row_count == 2  # two distinct cell rows
+        assert len(app._pool) == 1  # ...over ONE pooled channel
