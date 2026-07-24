@@ -45,8 +45,9 @@ def _label(ref: RunRef, attrs: Attrs, group_by: str | None, disambig: dict[str, 
     return disambig[ref_key(ref)]
 
 
-# Row-key prefix for section-header rows. Cannot collide with a data key: ref_key joins
-# (run_id, root, backend) and the attr-key joins "k=v" pairs — neither starts with "\x00\x00".
+# Row-key prefix for section-header rows. Won't collide with a data key for any realistic
+# backend/manifest: a ref_key would have to start with an empty run_id AND empty root, and an
+# attr-key would need a NUL-prefixed attr name — neither occurs in practice.
 _GROUP_HEADER = "\x00\x00GRP\x00"
 
 
@@ -58,9 +59,16 @@ def _header_cells(group: str) -> tuple[str, str, str, str, str, str, str, str]:
 
 def _grouped_order(items: list[tuple[str, str, str]]) -> list[str]:
     """Display order for grouped mode: groups ascending; within each group the header row first,
-    then its data rows by label ascending. `items` is (row_key, label, group)."""
-    by_group: dict[str, list[tuple[str, str]]] = {}
+    then its data rows by label ascending. `items` is (row_key, label, group). A row_key repeated
+    across items (the documented attrs-collision / non-deduped-manifest case) is collapsed to ONE
+    entry, last-wins -- matching flat mode's set-collapse. This dedup is load-bearing: a duplicate
+    in the returned order maps two positions onto one RowKey in `_reorder`, leaving a gap in
+    `_row_locations` that crashes the next paint (RowDoesNotExist)."""
+    by_key: dict[str, tuple[str, str]] = {}  # row_key -> (label, group), last-wins
     for key, label, group in items:
+        by_key[key] = (label, group)
+    by_group: dict[str, list[tuple[str, str]]] = {}
+    for key, (label, group) in by_key.items():
         by_group.setdefault(group, []).append((label, key))
     order: list[str] = []
     for group in sorted(by_group):

@@ -723,3 +723,29 @@ async def _enter_header_noop(tmp_path):
         await pilot.press("enter")
         await pilot.pause()
         assert not isinstance(app.screen, DrillDownScreen)  # a header opens nothing
+
+
+def test_grouping_survives_a_duplicate_row_key(tmp_path):
+    asyncio.run(_grouping_dup_key(tmp_path))
+
+
+async def _grouping_dup_key(tmp_path):
+    # A manifest can repeat an attrs record (or hand back a non-deduped shared RunRef), so two
+    # items collapse to ONE row_key. row_key's contract is last-wins, NOT a crash (flat mode
+    # honors it). Grouped mode must too: the reorder must not list the shared key twice, which
+    # would gap _row_locations and crash the next paint with RowDoesNotExist. Reading every row
+    # (get_row_at) drives exactly that render path.
+    r1 = _seed(tmp_path, "r1")
+    dup = {"scenario": "s", "variant": "v"}
+    app = MultiRunApp(
+        lambda now: [(r1, dup), (r1, dup)],  # identical attrs -> identical row_key
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        group_by="scenario",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        order = [t.get_row_at(i)[1] for i in range(t.row_count)]  # no gap -> no RowDoesNotExist
+        assert order == ["── s ──", "v"]  # one header + the single collapsed data row
