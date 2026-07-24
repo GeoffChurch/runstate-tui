@@ -4,7 +4,7 @@ import importlib.util
 import pytest
 
 
-@pytest.mark.parametrize("name", ["table", "single", "integrity", "drilldown", "stop"])
+@pytest.mark.parametrize("name", ["table", "grouped", "single", "integrity", "drilldown", "stop"])
 def test_every_scene_renders(name, tmp_path):  # sync wrapper — NO @pytest.mark.asyncio
     if importlib.util.find_spec("cairosvg") is None:
         pytest.skip("cairosvg not installed")

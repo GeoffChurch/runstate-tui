@@ -10,6 +10,16 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from runstate import create_channel
+from textual.app import App
+
+from runstate_tui.app import SingleRunApp
+from runstate_tui.env import Env
+from runstate_tui.multirun import MultiRunApp
+from runstate_tui.resolver import RunRef, explicit_resolver
+
+NOW = 300.0
+
 # Textual's SVG export draws macOS-style red/yellow/green window buttons in the title bar. They
 # read as three `●` traffic-lights and collide with the status dots the cockpit itself uses, so we
 # strip them. The offset/colors are constants in Textual's template; fail loudly if it ever stops
@@ -20,18 +30,8 @@ _WINDOW_BUTTONS = re.compile(r'\s*<g transform="translate\(26,22\)">.*?</g>', re
 def _strip_window_buttons(svg: str) -> str:
     stripped, n = _WINDOW_BUTTONS.subn("", svg, count=1)
     if n != 1:
-        raise RuntimeError("window-button chrome not found in exported SVG — Textual template changed?")
+        raise RuntimeError("window-button chrome missing — Textual SVG template changed?")
     return stripped
-
-from runstate import create_channel
-from textual.app import App
-
-from runstate_tui.app import SingleRunApp
-from runstate_tui.env import Env
-from runstate_tui.multirun import MultiRunApp
-from runstate_tui.resolver import RunRef, explicit_resolver
-
-NOW = 300.0
 
 
 def _corrupt(root: Path, run_id: str, seq: int, literal: str) -> None:
@@ -243,8 +243,64 @@ async def scene_stop(out_dir: Path) -> Path:
     )
 
 
+async def scene_grouped(out_dir: Path) -> Path:
+    root = Path(tempfile.mkdtemp())
+    # Four cells across two scenarios; the resolver supplies (RunRef, attrs) and the table sections
+    # on `scenario` (the group) while the `run` column shows `variant` (the non-group attr = label).
+    c = _ch(root, "run-a")  # en-ru-16M / fb_5k -- live + loss
+    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
+    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
+    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
+    c.close()
+    c = _ch(root, "run-b")  # en-ru-16M / fb_10k -- done
+    c.send({"handle": "local://h/2", "t": 50.0}, topic="lifecycle.started")
+    c.send({"step": 5000, "consumed_seq": 0, "t": 200.0}, topic="lifecycle.heartbeat")
+    c.send(
+        {"completed": True, "error": None, "final_step": 5000, "t": 205.0},
+        topic="lifecycle.stopped",
+    )
+    c.close()
+    c = _ch(root, "run-c")  # fr-en-4M / fb_5k -- stale
+    c.send({"handle": "local://h/3", "t": 60.0}, topic="lifecycle.started")
+    c.send({"step": 780, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
+    c.close()
+    c = _ch(root, "run-d")  # fr-en-4M / fb_10k -- errored
+    c.send({"handle": "local://h/4", "t": 100.0}, topic="lifecycle.started")
+    c.send({"step": 300, "consumed_seq": 0, "t": 180.0}, topic="lifecycle.heartbeat")
+    c.send(
+        {"completed": False, "error": "CUDA OOM", "final_step": 300, "t": 185.0},
+        topic="lifecycle.stopped",
+    )
+    c.close()
+    items = [
+        (("run-a", str(root), "sqlite"), {"scenario": "en-ru-16M", "variant": "fb_5k"}),
+        (("run-b", str(root), "sqlite"), {"scenario": "en-ru-16M", "variant": "fb_10k"}),
+        (("run-c", str(root), "sqlite"), {"scenario": "fr-en-4M", "variant": "fb_5k"}),
+        (("run-d", str(root), "sqlite"), {"scenario": "fr-en-4M", "variant": "fb_10k"}),
+    ]
+    app = MultiRunApp(
+        lambda now: items,
+        Env(clock=lambda: NOW, objective="loss"),
+        tick_interval=999,
+        group_by="scenario",
+    )
+
+    async def before(pilot: object) -> None:  # cursor OFF -- every row's dot shows undimmed
+        t = pilot.app.query_one("#runs")  # type: ignore[attr-defined]
+        t.cursor_type = "none"
+
+    return await capture(
+        app,
+        out_dir / "grouped.png",
+        size=(108, 10),
+        before=before,
+        title="runstate-tui — grouped by scenario",
+    )
+
+
 SCENES: dict[str, Callable[[Path], Awaitable[Path]]] = {
     "table": scene_table,
+    "grouped": scene_grouped,
     "single": scene_single,
     "integrity": scene_integrity,
     "drilldown": scene_drilldown,

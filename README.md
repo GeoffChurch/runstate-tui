@@ -15,6 +15,10 @@ The multi-run table — the whole sweep at a glance, a `●` traffic-light per r
 
 ![multi-run table](docs/img/table.png)
 
+The same runs, sectioned by a manifest attribute (`--group-by scenario`):
+
+![grouped table](docs/img/grouped.png)
+
 A single run, focused:
 
 ![single run](docs/img/single.png)
