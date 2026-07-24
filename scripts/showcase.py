@@ -4,10 +4,24 @@ deterministically (seeded logs + injected fixed clock). Run: `uv run python -m s
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+
+# Textual's SVG export draws macOS-style red/yellow/green window buttons in the title bar. They
+# read as three `●` traffic-lights and collide with the status dots the cockpit itself uses, so we
+# strip them. The offset/colors are constants in Textual's template; fail loudly if it ever stops
+# matching rather than silently shipping the disturbing chrome.
+_WINDOW_BUTTONS = re.compile(r'\s*<g transform="translate\(26,22\)">.*?</g>', re.DOTALL)
+
+
+def _strip_window_buttons(svg: str) -> str:
+    stripped, n = _WINDOW_BUTTONS.subn("", svg, count=1)
+    if n != 1:
+        raise RuntimeError("window-button chrome not found in exported SVG — Textual template changed?")
+    return stripped
 
 from runstate import create_channel
 from textual.app import App
@@ -48,7 +62,7 @@ async def capture(
         if before is not None:
             await before(pilot)
             await pilot.pause()
-        svg = app.export_screenshot(title=title)
+        svg = _strip_window_buttons(app.export_screenshot(title=title))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.with_suffix(".svg").write_text(svg)
     cairosvg.svg2png(bytestring=svg.encode(), write_to=str(out), scale=2.0)

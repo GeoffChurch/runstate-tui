@@ -52,11 +52,6 @@
     </defs>
 
     <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="145.6" rx="8"/><text class="terminal-1797290324-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">runstate-tui&#160;—&#160;single&#160;run</text>
-            <g transform="translate(26,22)">
-            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
-            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
-            <circle cx="44" cy="0" r="7" fill="#28c840"/>
-            </g>
         
     <g transform="translate(9, 41)" clip-path="url(#terminal-1797290324-clip-terminal)">
     <rect fill="#121212" x="0" y="1.5" width="634.4" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="634.4" y="1.5" width="634.4" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="25.9" width="0" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="25.9" width="1268.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="50.3" width="1268.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="74.7" width="1268.8" height="24.65" shape-rendering="crispEdges"/>
