@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from typing import Any
 
 from rich.text import Text
 from textual import work
+from textual._two_way_dict import TwoWayDict  # private: reorder rows to an arbitrary key sequence
 from textual.app import App, ComposeResult
 from textual.message import Message
 from textual.widgets import DataTable, Static
@@ -41,6 +43,40 @@ def _label(ref: RunRef, attrs: Attrs, group_by: str | None, disambig: dict[str, 
         shown = " ".join(v for k, v in sorted(attrs.items()) if k != group_by)
         return shown or disambig[ref_key(ref)]
     return disambig[ref_key(ref)]
+
+
+# Row-key prefix for section-header rows. Cannot collide with a data key: ref_key joins
+# (run_id, root, backend) and the attr-key joins "k=v" pairs — neither starts with "\x00\x00".
+_GROUP_HEADER = "\x00\x00GRP\x00"
+
+
+def _header_cells(group: str) -> tuple[str, str, str, str, str, str, str, str]:
+    """A non-interactive section-header row: the group name in the run column, blanks elsewhere.
+    It gets no ``_refs_by_key`` entry, so ``enter`` on it opens nothing (action_detail returns)."""
+    return ("", f"── {group} ──", "", "", "", "", "", "")
+
+
+def _grouped_order(items: list[tuple[str, str, str]]) -> list[str]:
+    """Display order for grouped mode: groups ascending; within each group the header row first,
+    then its data rows by label ascending. `items` is (row_key, label, group)."""
+    by_group: dict[str, list[tuple[str, str]]] = {}
+    for key, label, group in items:
+        by_group.setdefault(group, []).append((label, key))
+    order: list[str] = []
+    for group in sorted(by_group):
+        order.append(_GROUP_HEADER + group)
+        order.extend(key for _label, key in sorted(by_group[group]))
+    return order
+
+
+def _reorder(table: DataTable[Any], ordered_keys: list[str]) -> None:
+    """Set the table's display order to `ordered_keys` exactly, mirroring DataTable.sort's own body.
+    Needed because sort(key=...) only sees cell VALUES, and grouped labels repeat across groups, so
+    no cell tuple identifies a row -- only its str key does. Pinned to Textual 8.2.8."""
+    by_val = {k.value: k for k in table.rows.keys()}
+    table._row_locations = TwoWayDict({by_val[v]: i for i, v in enumerate(ordered_keys)})
+    table._update_count += 1
+    table.refresh()
 
 
 def _marker(row: Row) -> Text:
@@ -206,47 +242,71 @@ class MultiRunApp(App[None]):
     def on_table_ready(self, msg: TableReady) -> None:  # MAIN thread: keyed reconcile
         self._last_ready = self._env.clock()
         t = self.query_one("#runs", DataTable)
-        want = {row_key(ref, attrs) for ref, attrs, _row in msg.table}
         labels = disambiguate([ref for ref, _attrs, _row in msg.table])
-        self._refs_by_key = {row_key(ref, attrs): ref for ref, attrs, _row in msg.table}
+        gb = self._group_by
+        # one record per data row, in resolver order: (row_key, label, group, ref, Row)
+        items = [
+            (
+                row_key(ref, attrs),
+                _label(ref, attrs, gb, labels),
+                (attrs.get(gb, "") if gb is not None else ""),
+                ref,
+                row,
+            )
+            for ref, attrs, row in msg.table
+        ]
+        self._refs_by_key = {key: ref for key, _l, _g, ref, _r in items}
+        data_keys = {key for key, *_ in items}
+        header_keys = (
+            {_GROUP_HEADER + g for _k, _l, g, _ref, _r in items} if gb is not None else set()
+        )
+        want = data_keys | header_keys
         sel = None
         if t.row_count:
             sel = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
         with self.batch_update():  # App.batch_update — DataTable has none
-            # every row we ever add carries an explicit str key (ref_key(ref)), so
-            # k.value is never None in practice; the filter satisfies mypy --strict
-            # (RowKey.value is typed str | None) without changing behavior.
+            # every row we add carries an explicit str key, so k.value is never None in
+            # practice; the filter satisfies mypy --strict (RowKey.value is str | None).
             present = {k.value for k in list(t.rows.keys()) if k.value is not None}
             for key in present:
                 if key not in want:
                     t.remove_row(key)
             present &= want
-            for ref, attrs, row in msg.table:
-                key = row_key(ref, attrs)
-                cells = _cells(row, _label(ref, attrs, self._group_by, labels))
+            for key, label, _g, _ref, row in items:
+                cells = _cells(row, label)
                 if key in present:
                     for col, val in zip(_COLUMNS, cells, strict=True):
                         t.update_cell(key, col, val)
                 else:
                     t.add_row(*cells, key=key)
-                    # a resolver that yields the same ref twice this frame must UPDATE the
-                    # row it just added, never re-add it (add_row on a live key raises
-                    # DuplicateKey) -- so mark it present the instant it is added.
+                    # a shared ref appearing twice this frame must UPDATE the row it just
+                    # added, never re-add it (add_row on a live key raises DuplicateKey).
                     present.add(key)
-            t.sort("run")
+            if gb is None:
+                t.sort("run")  # flat: order by the run column, unchanged from before grouping
+            else:
+                for hkey in header_keys:
+                    hcells = _header_cells(hkey.removeprefix(_GROUP_HEADER))
+                    if hkey in present:
+                        for col, val in zip(_COLUMNS, hcells, strict=True):
+                            t.update_cell(hkey, col, val)
+                    else:
+                        t.add_row(*hcells, key=hkey)
+                        present.add(hkey)
+                _reorder(t, _grouped_order([(k, lab, g) for k, lab, g, _ref, _r in items]))
             if sel is not None and sel in want:
-                # sort() doesn't track the selected row key; restore it explicitly.
+                # sort()/reorder don't track the selected row key; restore it explicitly.
                 t.move_cursor(row=t.get_row_index(sel))
         empty = self.query_one("#empty", Static)
         summary = self.query_one("#summary", Static)
-        if self._empty_hint is not None and not want:
+        if self._empty_hint is not None and not data_keys:
             empty.display = True
             t.display = False
             summary.display = False
         else:
             empty.display = False
             t.display = True
-            if want:
+            if data_keys:
                 summary.update(format_fleet_summary([row for _ref, _attrs, row in msg.table]))
                 summary.display = True
             else:

@@ -676,3 +676,50 @@ async def _shared_run_two_rows(tmp_path):
         t = app.query_one("#runs", DataTable)
         assert t.row_count == 2  # two distinct cell rows
         assert len(app._pool) == 1  # ...over ONE pooled channel
+
+
+def test_grouping_renders_sections_in_order(tmp_path):
+    asyncio.run(_grouping_sections(tmp_path))
+
+
+async def _grouping_sections(tmp_path):
+    # group_by="scenario": groups ascending; within a group the header row first, then rows by
+    # label ascending. Rows come in a deliberately-unsorted order to prove the ordering.
+    r1, r2, r3 = _seed(tmp_path, "r1"), _seed(tmp_path, "r2"), _seed(tmp_path, "r3")
+    items = [
+        (r2, {"scenario": "beta", "variant": "v1"}),
+        (r1, {"scenario": "alpha", "variant": "v2"}),
+        (r3, {"scenario": "alpha", "variant": "v1"}),
+    ]
+    app = MultiRunApp(
+        lambda now: items, Env(clock=lambda: 150.0), tick_interval=999, group_by="scenario"
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        order = [t.get_row_at(i)[1] for i in range(t.row_count)]  # the 'run' column, top to bottom
+        assert order == ["── alpha ──", "v1", "v2", "── beta ──", "v1"]
+
+
+def test_enter_on_header_row_is_a_noop(tmp_path):
+    asyncio.run(_enter_header_noop(tmp_path))
+
+
+async def _enter_header_noop(tmp_path):
+    r1 = _seed(tmp_path, "r1")
+    app = MultiRunApp(
+        lambda now: [(r1, {"scenario": "a", "variant": "v"})],
+        Env(clock=lambda: 150.0),
+        tick_interval=999,
+        group_by="scenario",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        t = app.query_one("#runs", DataTable)
+        t.move_cursor(row=0)  # the "── a ──" header row (groups first)
+        assert t.get_row_at(0)[1] == "── a ──"  # confirm the cursor is on the header
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, DrillDownScreen)  # a header opens nothing
