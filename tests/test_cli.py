@@ -131,3 +131,56 @@ def test_missing_json_manifest_is_a_usage_error(monkeypatch, tmp_path):
     rc = m.main([str(tmp_path / "nope.json")])
     assert rc == 2
     assert made == {}  # neither app constructed nor run
+
+
+def test_group_by_equals_form_is_recognized(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(json.dumps([]))
+    m.main([str(manifest), "--group-by=scenario"])  # equals form, not two tokens
+    assert made["multi"]._group_by == "scenario"
+
+
+def test_unknown_flag_is_a_usage_error(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(json.dumps([]))
+    rc = m.main([str(manifest), "--bogus"])  # unknown flag must NOT leak as a phantom run path
+    assert rc == 2
+    assert made == {}
+
+
+def test_group_by_on_single_db_is_a_usage_error(monkeypatch, tmp_path):
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    f = tmp_path / "a.db"
+    f.write_text("")
+    rc = m.main([str(f), "--group-by", "scenario"])  # grouping is meaningless for a single run
+    assert rc == 2
+    assert made == {}  # not silently dropped -> a usage error, no app
+
+
+def test_duplicate_group_by_takes_last(monkeypatch, tmp_path):
+    import json
+
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(json.dumps([]))
+    m.main([str(manifest), "--group-by", "a", "--group-by", "b"])  # no leak; last wins
+    assert made["multi"]._group_by == "b"
