@@ -37,8 +37,13 @@ def main(argv: list[str] | None = None) -> int:
             empty_hint=f"watching {root}/**/*.db — no runs yet",
         ).run()  # real wall-clock; blocks until quit
         return 0
-    if len(args) == 1 and Path(args[0]).is_file() and Path(args[0]).suffix == ".json":
+    if len(args) == 1 and Path(args[0]).suffix.lower() == ".json":
         path = args[0]
+        if not Path(path).is_file():
+            # a .json arg ALWAYS means "manifest"; a missing one is a usage error (spec §5),
+            # never a fall-through to a phantom SingleRunApp over a nonexistent run.
+            print(f"error: manifest not found: {path}", file=sys.stderr)
+            return 2
         MultiRunApp(
             manifest_resolver(path),
             Env(clock=time.time),

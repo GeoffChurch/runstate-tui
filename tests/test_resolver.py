@@ -235,3 +235,26 @@ def test_manifest_missing_required_key_raises(tmp_path):
     path = _write_manifest(tmp_path, [{"root": "/x", "backend": "sqlite"}])  # no run_id
     with pytest.raises(KeyError):
         manifest_resolver(path)(0.0)
+
+
+def test_manifest_non_list_top_level_raises(tmp_path):
+    # A JSON object (not an array) must RAISE at the boundary, not silently iterate zero keys
+    # and read as an empty manifest (which would masquerade as "no runs yet").
+    from runstate_tui.resolver import manifest_resolver
+
+    p = tmp_path / "obj.json"
+    p.write_text("{}")
+    with pytest.raises(TypeError):
+        manifest_resolver(str(p))(0.0)
+
+
+def test_manifest_non_string_attr_value_raises(tmp_path):
+    # attrs are Mapping[str, str] (display metadata). A non-string value must RAISE at the
+    # manifest boundary, not sail through and blow up later in _label's join on the main thread.
+    from runstate_tui.resolver import manifest_resolver
+
+    path = _write_manifest(
+        tmp_path, [{"run_id": "r1", "root": "/x", "backend": "sqlite", "attrs": {"seed": 43}}]
+    )
+    with pytest.raises(TypeError):
+        manifest_resolver(path)(0.0)

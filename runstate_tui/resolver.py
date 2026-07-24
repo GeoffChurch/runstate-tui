@@ -69,7 +69,15 @@ def manifest_resolver(path: str) -> Resolver:
 
     def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
         entries = json.loads(manifest_path.read_text())
-        return [((e["run_id"], e["root"], e["backend"]), dict(e.get("attrs", {}))) for e in entries]
+        if not isinstance(entries, list):
+            raise TypeError(f"manifest must be a JSON array, got {type(entries).__name__}")
+        out: list[tuple[RunRef, Attrs]] = []
+        for e in entries:
+            attrs = dict(e.get("attrs", {}))
+            if not all(isinstance(v, str) for v in attrs.values()):
+                raise TypeError(f"manifest attrs must be str->str, got {attrs!r}")
+            out.append(((e["run_id"], e["root"], e["backend"]), attrs))
+        return out
 
     return resolve
 

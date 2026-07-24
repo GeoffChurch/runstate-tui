@@ -117,3 +117,17 @@ def test_json_manifest_without_group_by_is_flat(monkeypatch, tmp_path):
     manifest.write_text(json.dumps([]))
     m.main([str(manifest)])
     assert made["multi"]._group_by is None
+
+
+def test_missing_json_manifest_is_a_usage_error(monkeypatch, tmp_path):
+    # spec §5: a missing manifest path is a usage error (refuse to start), NOT a phantom
+    # SingleRunApp over a nonexistent run. A .json suffix routes to the manifest branch
+    # regardless of existence; a nonexistent one returns 2 and constructs no app.
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    rc = m.main([str(tmp_path / "nope.json")])
+    assert rc == 2
+    assert made == {}  # neither app constructed nor run
