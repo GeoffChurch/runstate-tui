@@ -56,7 +56,7 @@ the cell/run split is still being deliberated in runstate's backlog). **Build it
 need to dashboard a live mycooc sweep, with a real fixture to test against — otherwise defer (YAGNI).**
 See the `runstate-tui-cells-resolver-meaning` session memory.
 
-## Grouping — a per-row *relational* attribute record (the reference-TUI core of `cells`), deferred
+## Grouping — a per-row *relational* attribute record (the reference-TUI core of `cells`) — SHIPPED (PR #22)
 
 This is the reference-TUI-generic slice of the `cells` work above: sectioning + labeling the flat table by
 *grouping metadata*, with mycooc's domain specifics (the manifest schema, which axis is a group vs. a
@@ -108,9 +108,15 @@ Rejected populators (both smuggle structured data through a string when the tran
 objects): embedding facet metadata in the **channel id** (mycooc's seed-from-name style), and treating the
 **directory tree** as the metadata source rather than a sharing mechanism.
 
-**Gate:** deferred until a *second* grouping consumer creates the pull — the glob multi-root / translation
-view feeling flat. `cells` alone doesn't earn it (mycooc owns its own frontend). The FS convenience, if
-wanted, is the path → attrs adapter above, not a core default.
+**SHIPPED** (PR #22, 2026-07-24): un-deferred to dogfood through mycooc — the "second consumer" gate was
+dropped once it was clear grouping is basic enough that most users want the *capability*. `MultiRunApp(
+group_by=…)` sections a single `DataTable` via `── <group> ──` header rows ordered by a private
+`_row_locations` reorder; the `manifest_resolver` is the first attribute source; the CLI takes
+`<manifest>.json --group-by <attr>`. The FS convenience (a path → attrs adapter) was **not** built — it
+was the anti-pattern the relational model rejects. The mycooc-side manifest emitter (+ its atomic-write
+contract) is the remaining producer half, tracked in mycooc's own repo. **Deferred within grouping:**
+multi-attr / runtime pivot, and a run *missing* the group attr renders under an unnamed `── ──` section
+(labelled bucket TBD if it ever matters).
 
 ## Related deferred findings that surface here (not table features)
 
