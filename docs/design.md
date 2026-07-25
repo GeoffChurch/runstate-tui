@@ -145,10 +145,6 @@ seams. Highlights:
   core is freshness-only; the overlay seam is committed. Also the home of log-level `conflicted`,
   which needs probe corroboration, not a fold change.
 - **`cells` resolver** — the mycooc experiment/cell layout adapter; externally gated on mycooc's
-  still-settling layout. Drops onto the shipped resolver/`MultiRunApp` seams.
+  still-settling layout. Drops onto the existing resolver/`MultiRunApp` seams.
 - **Value trend / trajectory** — the lightweight in-terminal plot discussed above.
 - **`run_epoch`, metric-name discovery, animated GIFs** — smaller additive items.
-
-**Shipped since the original design:** read-only open (`open_channel` → `attach_channel` /
-`create_channel` split, with stat-before-open collapsed) — the one real upstream ask, now landed;
-issue-flood aggregation; relational grouping.

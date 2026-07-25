@@ -1,8 +1,7 @@
 # Metric-name discovery — lazy default, explicit complete scan, upstream TODO
 
-**Status:** deferred. The metric-**picker** is a Stage-3+ feature; the core value display uses a
-hand-configured **objective** and needs none of this. Captured so the honest-UX shape and the
-upstream question aren't re-derived later.
+The metric-**picker** is deferred; the core value display uses a hand-configured **objective** and
+needs none of this. Captured so the honest-UX shape and the upstream question aren't re-derived later.
 
 ## The problem
 

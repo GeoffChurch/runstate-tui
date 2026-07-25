@@ -1,6 +1,6 @@
 # Liveness overlay — external liveness probes
 
-**Status:** deferred (implementation). The **seam is committed now** in the core spec
+The implementation is deferred, but the **seam is committed** in the core spec
 (`../superpowers/specs/2026-07-17-runstate-tui-core-design.md` §2.1, §14.2), so pulling this in
 is additive — no core rewrite. Pull it in at the first same-host run where "is the process
 actually alive?" matters beyond freshness, or the first SLURM/k8s group where freshness alone
@@ -42,10 +42,9 @@ SLURM/k8s deployments, where `os.kill` from the cockpit host means nothing.
   core can only say `stale`).
 - probe-`conflicted` — a terminal record co-existing with a probe that says the process is alive
   (a genuine contradiction the pure fold cannot see).
-- **log-level `conflicted` also belongs here (2026-07-18 red-team verdict).** The §4/§4.1
-  triggers — "two live episodes" and "activity strictly after a terminal, no re-start" — look
-  like a pure-log seq-ordering check, but a 3-lens adversarial review (verified vs
-  `runstate/observables.py`) showed a pure-record check **fires on ordinary crash+relaunch**:
+- **log-level `conflicted` also belongs here.** The §4/§4.1 triggers — "two live episodes" and
+  "activity strictly after a terminal, no re-start" — look like a pure-log seq-ordering check, but a
+  pure-record check **fires on ordinary crash+relaunch**:
   `live_episode` declares an episode dead via `resolve(handle) is False` with **no**
   `lifecycle.stopped`, so `started → … → started` (no stop between) is the system's *normal*
   recovery shape, and narrowing the read to `lifecycle.*`+`control.*` discards the
@@ -57,9 +56,9 @@ SLURM/k8s deployments, where `os.kill` from the cockpit host means nothing.
   `stuck_threshold`-flavored *policy* judgment, not an upstream fact). When built, it is a
   MEDIUM **issue** on the real verdict ("undischarged prior claim — verify"), never a dominating
   status; `StatusKind.CONFLICTED` currently exists at MEDIUM, unused. Judge by **seq, never `t`**.
-  Do NOT re-propose the "one seq-aware lifecycle fold" rewrite (the review rejected it: the
-  verdict fold is assigned upstream per spec §3.2/§12, `lifecycle.*` includes unbounded
-  heartbeats, and §3.1 forbids a single open+all-reads guard).
+  Do NOT re-propose the "one seq-aware lifecycle fold" rewrite — it is rejected: the verdict fold is
+  assigned upstream per spec §3.2/§12, `lifecycle.*` includes unbounded heartbeats, and §3.1 forbids
+  a single open+all-reads guard.
 - These enter the `Status` open coproduct as new self-describing members; the §4.1 precedence
   lattice gains rows **above** the terminal row, reconciled over the abstract `Liveness` value —
   no change to existing rows.
@@ -84,9 +83,9 @@ SLURM/k8s deployments, where `os.kill` from the cockpit host means nothing.
 - Fits §8 "stays in the cockpit" (deployment policy) and runstate's bring-your-own-launcher
   stance (a SLURM launcher example already ships in runstate `examples/submitit/`).
 
-## Representation, severity & residual decisions (settled 2026-07-19)
+## Representation, severity & residual decisions
 
-The 2026-07-18 verdict above left `conflicted`'s *shape* open. Settled now:
+`conflicted`'s *shape* is settled:
 
 - **Don't collapse — render the disagreement, don't fold it into a verdict.** Keep the log-fold
   verdict (the existing `status`) and the probe verdict as two *separate* factors on the `Row`;
