@@ -18,8 +18,12 @@ describes what is still open, not what already landed; git history carries the p
   `squeue`/`kubectl` cross-host). Seam committed in the core spec §2.1/§14.2; core is
   freshness-only. **Also the home of log-level `conflicted`**, which needs probe corroboration plus a
   row-3-vs-row-4 policy call — not a fold rewrite.
-- [metric-discovery](metric-discovery.md) — lazy metric-name discovery (default, labeled
-  *partial*) + an explicit expensive full-log scan for completeness; upstream TODO to investigate a
-  runstate name-enumeration API, filed only on demand.
+- [interactive-objective](interactive-objective.md) — change the value column's metric from inside
+  the cockpit instead of only at launch. **Gated on runstate#19**: `latest(VALUE, name=…)` is an
+  index seek only on a hit, and typing names makes the ~85 ms miss routine. Carries the
+  Env-travels-with-the-frame invariant and the verified Textual mechanics.
+- [metric-discovery](metric-discovery.md) — a metric-name *picker*. Blocked on the same missing
+  name-aware index (runstate#19), which would make the complete list an index scan and retire the
+  lazy/partial design before it is built.
 - [showcase-gifs](showcase-gifs.md) — animated usage GIFs, generated from the same headless
   fixture-basis machinery that renders the static screenshots.
