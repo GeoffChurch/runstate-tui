@@ -184,3 +184,58 @@ def test_duplicate_group_by_takes_last(monkeypatch, tmp_path):
     manifest.write_text(json.dumps([]))
     m.main([str(manifest), "--group-by", "a", "--group-by", "b"])  # no leak; last wins
     assert made["multi"]._group_by == "b"
+
+
+def _empty_manifest(tmp_path):
+    import json
+
+    manifest = tmp_path / "exp.json"
+    manifest.write_text(json.dumps([]))
+    return str(manifest)
+
+
+def test_objective_defaults_to_the_env_default(monkeypatch, tmp_path):
+    # Asserted against Env's own default, not a literal, so the CLI can never drift from it.
+    import runstate_tui.__main__ as m
+    from runstate_tui.env import Env
+
+    made = {}
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    f = tmp_path / "a.db"
+    f.write_text("")
+    m.main([str(f)])
+    assert made["single"]._env.objective == Env.objective
+    assert made["single"]._env.stuck_threshold == Env.stuck_threshold  # not a CLI knob
+
+
+def test_objective_threads_into_a_multirun_env(monkeypatch, tmp_path):
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    m.main([_empty_manifest(tmp_path), "--objective", "mean_p1"])
+    assert made["multi"]._env.objective == "mean_p1"
+
+
+def test_objective_threads_into_a_single_run_env(monkeypatch, tmp_path):
+    # Unlike --group-by, this applies to EVERY target shape: it parameterizes the fold, not the
+    # aggregation, and the single-run view is the same fold at the singleton resolver.
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
+    f = tmp_path / "a.db"
+    f.write_text("")
+    m.main([str(f), "--objective", "loss"])
+    assert made["single"]._env.objective == "loss"
+
+
+def test_objective_accepts_any_name(monkeypatch, tmp_path):
+    # Whether the name exists is a RUNTIME fact (an absent value folds to a blank cell), so the
+    # CLI must not pre-validate it against anything.
+    import runstate_tui.__main__ as m
+
+    made = {}
+    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
+    m.main([_empty_manifest(tmp_path), "--objective=no_such_metric"])  # equals form too
+    assert made["multi"]._env.objective == "no_such_metric"

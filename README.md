@@ -60,6 +60,9 @@ Add `--group-by <attr>` to section the table by a manifest attribute (e.g.
 `runstate-tui exp.json --group-by scenario`). Grouping needs attributes, so it applies to a
 manifest (or any multi-run target), not a single run.
 
+`--objective NAME` picks which reported value fills the value column — blank until you name one.
+Unlike `--group-by` it applies to every target shape, including a single run.
+
 ## Keys
 
 | Key | Action |
