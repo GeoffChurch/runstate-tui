@@ -40,11 +40,15 @@ the formal treatment (limits/colimits, the precedence lattice, the seam table) i
   same fold. "Watch live" and "triage a sweep" are the same table under a different filter/sort;
   "inspect one run" is the drill-down, the *same* fold projected to a finer codomain.
 
-- **Two planes: fold vs query.** Parameter-free summaries of the whole log (status, frontier,
-  freshness, value, elapsed, episodes, stops, demand) are a **fold** — they *are* the `Row`,
-  re-derived each tick. A windowed/filtered slice of the raw envelope sequence (the log pane) is a
-  **query** parameterized by interactive view state — not a `Row` factor. The fold is the pure core;
-  the log query is the reactive shell.
+- **Two planes: fold vs query — and the discriminator is cost.** Summaries of the whole log
+  (status, frontier, freshness, value, elapsed, episodes, stops, demand) are a **fold** — they *are*
+  the `Row`, re-derived each tick. A windowed slice of the raw envelope sequence (the log pane) is a
+  **query**, parameterized by interactive view state and not a `Row` factor. The line between them
+  is **what a read costs**: an index seek per tick is a fold; anything that walks the log is a
+  query, and queries are barred from the per-frame path (see Scale). *Parameter-free* is the wrong
+  discriminator — the value factor takes an objective and is still a fold — and a read is not a fold
+  merely because it looks like a point lookup: see the `latest(VALUE, name=…)` case below, where a
+  name the substrate can't seek turns the same call into a scan.
 
 - **One operational law: poll a cheap watermark, apply the delta, never rebuild.** It shows up in
   five places — the stop handshake, the log pane, the fold (re-read only if `last_seq()` moved), the
@@ -128,9 +132,17 @@ enumerates all N.
 - **A `SqliteChannel` holds 3 fds** → a naive viewer EMFILEs at ~340 open runs. **The LRU pool is
   not optional.**
 - **No per-frame data-plane refolds.** The O(N) exclusion is `value_series` (~1.9 s at 10⁶
-  envelopes). A last-value peek and a zero-replay ring-buffer trend are cheap and *not* replays — a
-  full trajectory pays the O(N) cost only on demand, in one run's drill-down (see the value-trend
-  roadmap).
+  envelopes). A zero-replay ring-buffer trend is cheap and *not* a replay — a full trajectory pays
+  the O(N) cost only on demand, in one run's drill-down (see the value-trend roadmap).
+- **The last-value peek is cheap only on a hit — measured, not assumed.** `latest(VALUE,
+  name=objective)` looks like a point lookup, but both backends index `(topic, seq)` with no `name`,
+  so the name is a post-filter walking the topic partition backwards. Measured at 500k value
+  records: **0.01 ms** when the name is at the tail, **~85 ms** when it is absent, rare, or emitted
+  early. A name no run reports therefore blows the frame budget by three orders of magnitude across
+  a fleet — it *is* the banned O(N) VALUE scan under another name. There is no consumer-side fix (a
+  negative cache can't know when a metric first appears; a `last_seq()` gate doesn't help live
+  runs), so it is filed upstream as **runstate#19** and bounds what the objective may be wired to:
+  a name chosen once at launch is fine, a name typed interactively is not, until that lands.
 - **I/O off the render thread, on a single owner thread** that owns the whole pool (reader == evictor
   → no use-after-close, no lock-order to violate); a **dedicated stop thread** so a data-plane stall
   can't starve `stop`. A wedged open degrades to a cockpit-level `⚠ I/O stalled`, never a frozen
