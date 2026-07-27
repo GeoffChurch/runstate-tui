@@ -21,12 +21,18 @@ class CliArgs:
 
     paths: tuple[str, ...]
     group_by: str | None
+    objective: str | None
+    stuck_threshold: float
 
     def __post_init__(self) -> None:
         if (
             not self.paths
         ):  # argparse nargs="+" guarantees this; the dataclass owns its own contract
             raise ValueError("at least one target is required")
+        if self.stuck_threshold <= 0:
+            # Silently degenerate otherwise: FreshnessSignal clamps age to >= 0, so a
+            # non-positive threshold makes EVERY run read stale forever. Fail loud.
+            raise ValueError(f"--stuck-threshold must be positive, got {self.stuck_threshold}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -44,12 +50,33 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="section the multi-run table by this manifest attribute",
     )
+    # Unlike --group-by (an aggregation knob, meaningless for one run), these two parameterize
+    # the FOLD, so they apply to every target shape -- single-run is that same fold at the
+    # singleton resolver. Defaults are read off Env so the CLI can't drift from it.
+    p.add_argument(
+        "--objective",
+        metavar="NAME",
+        default=Env.objective,
+        help="value name to show in the value column (the metric your runs report)",
+    )
+    p.add_argument(
+        "--stuck-threshold",
+        metavar="SECONDS",
+        type=float,
+        default=Env.stuck_threshold,
+        help="a run silent for longer than this reads stale (default: %(default)s)",
+    )
     return p
 
 
-def _multirun(resolver: Resolver, group_by: str | None, empty_hint: str | None = None) -> None:
+def _env(cfg: CliArgs) -> Env:
+    """The ONE Env construction site: real wall-clock plus the CLI's fold parameters."""
+    return Env(clock=time.time, objective=cfg.objective, stuck_threshold=cfg.stuck_threshold)
+
+
+def _multirun(resolver: Resolver, cfg: CliArgs, empty_hint: str | None = None) -> None:
     MultiRunApp(
-        resolver, Env(clock=time.time), group_by=group_by, empty_hint=empty_hint
+        resolver, _env(cfg), group_by=cfg.group_by, empty_hint=empty_hint
     ).run()  # real wall-clock; blocks until quit
 
 
@@ -58,7 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ns = parser.parse_args(argv)  # argv=None -> argparse reads sys.argv[1:]
         try:
-            cfg = CliArgs(paths=tuple(ns.paths), group_by=ns.group_by)
+            cfg = CliArgs(
+                paths=tuple(ns.paths),
+                group_by=ns.group_by,
+                objective=ns.objective,
+                stuck_threshold=ns.stuck_threshold,
+            )
         except ValueError as e:  # a dataclass invariant -> a clean usage error, not a traceback
             parser.error(str(e))
         return _dispatch(cfg, parser)
@@ -73,7 +105,7 @@ def _dispatch(cfg: CliArgs, parser: argparse.ArgumentParser) -> int:
     paths = cfg.paths
     if len(paths) == 1 and Path(paths[0]).is_dir():
         root = paths[0]
-        _multirun(glob_resolver(root), cfg.group_by, f"watching {root}/**/*.db — no runs yet")
+        _multirun(glob_resolver(root), cfg, f"watching {root}/**/*.db — no runs yet")
         return 0
     if len(paths) == 1 and Path(paths[0]).suffix.lower() == ".json":
         path = paths[0]
@@ -81,17 +113,17 @@ def _dispatch(cfg: CliArgs, parser: argparse.ArgumentParser) -> int:
             # a .json arg ALWAYS means "manifest"; a missing one is a usage error (spec §5),
             # never a fall-through to a phantom SingleRunApp over a nonexistent run.
             parser.error(f"manifest not found: {path}")
-        _multirun(manifest_resolver(path), cfg.group_by, f"watching {path} — no runs yet")
+        _multirun(manifest_resolver(path), cfg, f"watching {path} — no runs yet")
         return 0
     if len(paths) >= 2:
-        _multirun(explicit_resolver([ref_from_path(p) for p in paths]), cfg.group_by)
+        _multirun(explicit_resolver([ref_from_path(p) for p in paths]), cfg)
         return 0
     # a single run.db -- the only non-multi-run target, so grouping has no meaning here.
     if cfg.group_by is not None:
         parser.error(
             "--group-by applies to a directory / manifest / multiple runs, not a single run"
         )
-    SingleRunApp(ref_from_path(paths[0]), Env(clock=time.time)).run()  # blocks until quit
+    SingleRunApp(ref_from_path(paths[0]), _env(cfg)).run()  # blocks until quit
     return 0
 
 
