@@ -22,17 +22,12 @@ class CliArgs:
     paths: tuple[str, ...]
     group_by: str | None
     objective: str | None
-    stuck_threshold: float
 
     def __post_init__(self) -> None:
         if (
             not self.paths
         ):  # argparse nargs="+" guarantees this; the dataclass owns its own contract
             raise ValueError("at least one target is required")
-        if self.stuck_threshold <= 0:
-            # Silently degenerate otherwise: FreshnessSignal clamps age to >= 0, so a
-            # non-positive threshold makes EVERY run read stale forever. Fail loud.
-            raise ValueError(f"--stuck-threshold must be positive, got {self.stuck_threshold}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,28 +45,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="section the multi-run table by this manifest attribute",
     )
-    # Unlike --group-by (an aggregation knob, meaningless for one run), these two parameterize
-    # the FOLD, so they apply to every target shape -- single-run is that same fold at the
-    # singleton resolver. Defaults are read off Env so the CLI can't drift from it.
+    # Unlike --group-by (an aggregation knob, meaningless for one run), this parameterizes the
+    # FOLD, so it applies to every target shape -- single-run is that same fold at the singleton
+    # resolver. The default is read off Env so the CLI can't drift from it.
     p.add_argument(
         "--objective",
         metavar="NAME",
         default=Env.objective,
         help="value name to show in the value column (the metric your runs report)",
     )
-    p.add_argument(
-        "--stuck-threshold",
-        metavar="SECONDS",
-        type=float,
-        default=Env.stuck_threshold,
-        help="a run silent for longer than this reads stale (default: %(default)s)",
-    )
     return p
 
 
 def _env(cfg: CliArgs) -> Env:
     """The ONE Env construction site: real wall-clock plus the CLI's fold parameters."""
-    return Env(clock=time.time, objective=cfg.objective, stuck_threshold=cfg.stuck_threshold)
+    return Env(clock=time.time, objective=cfg.objective)
 
 
 def _multirun(resolver: Resolver, cfg: CliArgs, empty_hint: str | None = None) -> None:
@@ -85,12 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ns = parser.parse_args(argv)  # argv=None -> argparse reads sys.argv[1:]
         try:
-            cfg = CliArgs(
-                paths=tuple(ns.paths),
-                group_by=ns.group_by,
-                objective=ns.objective,
-                stuck_threshold=ns.stuck_threshold,
-            )
+            cfg = CliArgs(paths=tuple(ns.paths), group_by=ns.group_by, objective=ns.objective)
         except ValueError as e:  # a dataclass invariant -> a clean usage error, not a traceback
             parser.error(str(e))
         return _dispatch(cfg, parser)

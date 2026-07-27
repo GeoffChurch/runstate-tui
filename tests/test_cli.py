@@ -1,5 +1,3 @@
-import pytest
-
 from runstate_tui.__main__ import main
 
 
@@ -196,8 +194,8 @@ def _empty_manifest(tmp_path):
     return str(manifest)
 
 
-def test_fold_params_default_to_the_env_defaults(monkeypatch, tmp_path):
-    # Asserted against Env's own defaults, not literals, so the CLI can never drift from them.
+def test_objective_defaults_to_the_env_default(monkeypatch, tmp_path):
+    # Asserted against Env's own default, not a literal, so the CLI can never drift from it.
     import runstate_tui.__main__ as m
     from runstate_tui.env import Env
 
@@ -207,21 +205,20 @@ def test_fold_params_default_to_the_env_defaults(monkeypatch, tmp_path):
     f.write_text("")
     m.main([str(f)])
     assert made["single"]._env.objective == Env.objective
-    assert made["single"]._env.stuck_threshold == Env.stuck_threshold
+    assert made["single"]._env.stuck_threshold == Env.stuck_threshold  # not a CLI knob
 
 
-def test_fold_params_thread_into_a_multirun_env(monkeypatch, tmp_path):
+def test_objective_threads_into_a_multirun_env(monkeypatch, tmp_path):
     import runstate_tui.__main__ as m
 
     made = {}
     monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
-    m.main([_empty_manifest(tmp_path), "--objective", "mean_p1", "--stuck-threshold", "900"])
+    m.main([_empty_manifest(tmp_path), "--objective", "mean_p1"])
     assert made["multi"]._env.objective == "mean_p1"
-    assert made["multi"]._env.stuck_threshold == 900.0
 
 
-def test_fold_params_thread_into_a_single_run_env(monkeypatch, tmp_path):
-    # Unlike --group-by, both apply to EVERY target shape: they parameterize the fold, not the
+def test_objective_threads_into_a_single_run_env(monkeypatch, tmp_path):
+    # Unlike --group-by, this applies to EVERY target shape: it parameterizes the fold, not the
     # aggregation, and the single-run view is the same fold at the singleton resolver.
     import runstate_tui.__main__ as m
 
@@ -229,24 +226,8 @@ def test_fold_params_thread_into_a_single_run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
     f = tmp_path / "a.db"
     f.write_text("")
-    m.main([str(f), "--objective", "loss", "--stuck-threshold", "5"])
+    m.main([str(f), "--objective", "loss"])
     assert made["single"]._env.objective == "loss"
-    assert made["single"]._env.stuck_threshold == 5.0
-
-
-@pytest.mark.parametrize("bad", ["0", "-30", "notanumber"])
-def test_nonpositive_or_unparseable_stuck_threshold_is_a_usage_error(monkeypatch, tmp_path, bad):
-    # A non-positive threshold is silently degenerate (age is clamped >= 0, so every run reads
-    # stale forever) -- fail loud at the boundary rather than render a uniformly wrong table.
-    import runstate_tui.__main__ as m
-
-    made = {}
-    monkeypatch.setattr(m.SingleRunApp, "run", lambda self: made.setdefault("single", self))
-    monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
-    f = tmp_path / "a.db"
-    f.write_text("")
-    assert m.main([str(f), "--stuck-threshold", bad]) == 2
-    assert made == {}  # no app constructed
 
 
 def test_objective_accepts_any_name(monkeypatch, tmp_path):
