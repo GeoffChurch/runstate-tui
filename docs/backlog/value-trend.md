@@ -1,14 +1,14 @@
 # Value trend / trajectory — a lightweight in-terminal plot
 
-**Status: deferred, seam committed.** The core has always been control-plane-focused ("no scientific
-plots"), but that separation is a *stance, not a law* (owner, 2026-07-24): a lightweight in-terminal
-trend — a value or the progress rate over steps, or one value against another as an arbitrary
-trajectory — is a natural fit. What it must respect is not the philosophy but the **scale seam**.
+The cockpit is control-plane-focused, but the separation from visualization is a *stance, not a law*:
+a lightweight in-terminal trend — a value or the progress rate over steps, or one value against
+another as an arbitrary trajectory — is a natural fit. What it must respect is not the philosophy but
+the **scale seam**.
 
 ## The two forms — split by cost, not by taste
 
 The original ban braided two reasons together; only the identity one is relaxed. The **scale** reason
-stands and cleanly partitions the feature:
+stands, and it cleanly partitions the feature:
 
 - **Cheap trend (free, per-frame OK).** A zero-replay ring buffer over the already-sampled frontier /
   value gives a sparkline-grade trend at ~no cost — explicitly *not* a data-plane replay (core spec

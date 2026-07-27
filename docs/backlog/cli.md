@@ -1,10 +1,10 @@
 # CLI dispatch — deferred hardening
 
 The CLI is a **shape-dispatch**: it branches on what the positional target *is* — `is_dir` → glob,
-`.json` → manifest, ≥2 paths → explicit, one `.db` → single. The flag layer is **argparse** (PR
-following #22): `--group-by` (incl. `=`-form), unknown-flag rejection, and a frozen `CliArgs`
-dataclass for typed field access + one validation site. The shape-dispatch stays custom because no
-flag parser does type-of-positional dispatch.
+`.json` → manifest, ≥2 paths → explicit, one `.db` → single. The flag layer is **argparse**:
+`--group-by` (incl. `=`-form), unknown-flag rejection, and a frozen `CliArgs` dataclass for typed
+field access + one validation site. The shape-dispatch stays custom because no flag parser does
+type-of-positional dispatch.
 
 ## Deferred: explicit subcommands
 
