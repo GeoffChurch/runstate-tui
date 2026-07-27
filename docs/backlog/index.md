@@ -22,6 +22,10 @@ describes what is still open, not what already landed; git history carries the p
   the cockpit instead of only at launch. **Gated on runstate#19**: `latest(VALUE, name=…)` is an
   index seek only on a hit, and typing names makes the ~85 ms miss routine. Carries the
   Env-travels-with-the-frame invariant and the verified Textual mechanics.
+- [per-run-objective](per-run-objective.md) — let the manifest declare each run's metric, as a
+  sibling field rather than an attr (attrs are labeling/grouping only, never fold input). Run
+  classes that track different metrics are legitimate; the invariant becomes *comparable within a
+  section*. Gated on the first real manifest emitter.
 - [metric-discovery](metric-discovery.md) — a metric-name *picker*. Blocked on the same missing
   name-aware index (runstate#19), which would make the complete list an index scan and retire the
   lazy/partial design before it is built.
