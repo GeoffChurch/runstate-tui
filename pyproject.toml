@@ -21,7 +21,9 @@ build-backend = "setuptools.build_meta"
 packages = ["runstate_tui"]
 
 [tool.uv.sources]
-runstate = { git = "https://github.com/GeoffChurch/runstate", branch = "master" }
+# PINNED to a commit 2026-10-03, the same one mycooc and translation pin: the cockpit reads their
+# logs, so it must run the runstate that wrote them. Bump it together with theirs.
+runstate = { git = "https://github.com/GeoffChurch/runstate", rev = "72d9c3f5e367f780fcb01b6e90f7bc30ab569f9d" }
 
 [tool.ruff]
 line-length = 100
