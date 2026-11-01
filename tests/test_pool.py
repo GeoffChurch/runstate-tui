@@ -1,5 +1,4 @@
 import sqlite3
-from pathlib import Path
 
 import pytest
 from runstate import create_channel
@@ -8,12 +7,15 @@ from runstate_tui.env import Env
 from runstate_tui.pool import ChannelPool, fold_frame
 from runstate_tui.table import render_single
 from runstate_tui.types import Severity, StatusKind
-from tests.helpers import corrupt_seq
+from tests.helpers import corrupt_seq, log_path, move_log
+from tests.records import Script, write
 
 
 def _seed(tmp_path, run_id, t=100.0):
     ch = create_channel(run_id, root=tmp_path, backend="sqlite")
-    ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
+    s = Script()
+    s.started(t, "h")
+    write(ch, s.records)
     ch.close()
     return (run_id, str(tmp_path), "sqlite")
 
@@ -93,7 +95,7 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=2)
     fold_frame(pool, [(refs[0], {})], env, 150.0)  # open r0 alone
-    ch0 = pool._open[refs[0]]  # capture its handle
+    ch0 = pool._open[refs[0]].channel  # capture its handle
     fold_frame(pool, [(r, {}) for r in refs], env, 151.0)  # r0 is the LRU -> evicted + closed
     assert len(pool) <= 2  # LRU kept the pool bounded
     with pytest.raises(sqlite3.ProgrammingError):
@@ -114,7 +116,7 @@ def test_row_for_evicts_a_pooled_run_whose_db_file_vanishes(tmp_path):
     pool = ChannelPool(cap=8)
     fold_frame(pool, [(ref, {})], env, 150.0)  # first fold: opens + pools the channel
     assert ref in pool._open
-    (Path(tmp_path) / "a.db").unlink()
+    log_path(tmp_path, "a").unlink()
     table = _rows(fold_frame(pool, [(ref, {})], env, 151.0))  # second fold: stat finds it gone
     assert table[ref].status.kind is StatusKind.MISSING
     assert ref not in pool._open  # evicted, not left dangling in the pool
@@ -128,9 +130,44 @@ def test_reconcile_closes_runs_that_left_the_resolver(tmp_path):
     pool = ChannelPool(cap=8)
     fold_frame(pool, [(a, {}), (b, {})], env, 150.0)
     assert len(pool) == 2
-    ch_b = pool._open[b]  # capture b's handle
+    ch_b = pool._open[b].channel  # capture b's handle
     fold_frame(pool, [(a, {})], env, 151.0)
     assert len(pool) == 1  # b dropped + closed
     with pytest.raises(sqlite3.ProgrammingError):
         ch_b.read(after=0)  # b's handle was actually closed
+    pool.close_all()
+
+
+def test_pool_holds_folds_beside_the_channel_and_reads_only_new_records(tmp_path):
+    # the polled path: a pooled run's folds survive across frames, so frame k reads only
+    # what landed since frame k-1, and its row equals a cold fold's
+    ref = ("live", str(tmp_path), "sqlite")
+    writer = create_channel("live", root=tmp_path, backend="sqlite")
+    s = Script()
+    s.started(100.0)
+    write(writer, s.records)
+    env = Env(clock=lambda: 150.0, objective="loss")
+    pool = ChannelPool(cap=8)
+    fold_frame(pool, [(ref, {})], env, 150.0)
+    folds = pool._open[ref].folds
+    for i in range(3):
+        before = len(s.records)
+        s.value("loss", 1.0 / (i + 1), 101.0 + i)
+        s.commit(101.0 + i)
+        write(writer, s.records[before:])
+        row = _rows(fold_frame(pool, [(ref, {})], env, 150.0))[ref]
+        assert pool._open[ref].folds is folds  # the same folds, held
+        assert row == render_single(ref, env)  # ... and they agree with a cold fold
+    assert row.frontier == 3 and row.value.value == 1.0 / 3
+    writer.close()
+    pool.close_all()
+
+
+def test_a_run_in_another_format_is_a_format_row_and_never_pooled(tmp_path):
+    ref = _seed(tmp_path, "old")
+    move_log(tmp_path, "old", to=log_path(tmp_path, "old", version="0.3.0"))
+    pool = ChannelPool(cap=8)
+    row = _rows(fold_frame(pool, [(ref, {})], Env(clock=lambda: 150.0), 150.0))[ref]
+    assert row.status.kind is StatusKind.LOG_FORMAT and row.severity is Severity.HIGH
+    assert ref not in pool._open  # retried next tick: a run migrated meanwhile opens
     pool.close_all()

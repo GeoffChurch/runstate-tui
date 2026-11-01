@@ -12,11 +12,14 @@ from runstate_tui.env import Env
 from runstate_tui.multirun import MultiRunApp
 from runstate_tui.pool import ChannelPool
 from runstate_tui.resolver import explicit_resolver, ref_key
+from tests.records import Script, write
 
 
 def _seed(tmp_path, run_id, t=100.0):
     ch = create_channel(run_id, root=tmp_path, backend="sqlite")
-    ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
+    s = Script()
+    s.started(t, "h")
+    write(ch, s.records)
     ch.close()
     return (run_id, str(tmp_path), "sqlite")
 
@@ -48,7 +51,9 @@ async def _row_updates_and_preserves_cursor(tmp_path):
         t = app.query_one("#runs", DataTable)
         before = t.cursor_coordinate
         w = create_channel("a", root=ref[1], backend="sqlite")
-        w.send({"step": 5, "consumed_seq": 0, "t": 150.0}, topic="lifecycle.heartbeat")
+        w.send(
+            {"claim_seq": 1, "consumed_seq": 0, "t": 150.0}, topic="lifecycle.heartbeat"
+        )  # lifecycle-v0.6's heartbeat names its claim
         w.close()
         app._tick()
         await pilot.pause()

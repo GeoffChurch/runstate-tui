@@ -5,18 +5,19 @@ from __future__ import annotations
 
 import asyncio
 import re
-import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from runstate import create_channel
+from runstate import Outcome, create_channel
 from textual.app import App
 
 from runstate_tui.app import SingleRunApp
 from runstate_tui.env import Env
 from runstate_tui.multirun import MultiRunApp
 from runstate_tui.resolver import RunRef, explicit_resolver
+from tests.helpers import corrupt_seq, log_path, move_log
+from tests.records import Script, write
 
 NOW = 300.0
 
@@ -34,15 +35,27 @@ def _strip_window_buttons(svg: str) -> str:
     return stripped
 
 
-def _corrupt(root: Path, run_id: str, seq: int, literal: str) -> None:
-    conn = sqlite3.connect(str(root / f"{run_id}.db"))
-    conn.execute("UPDATE log SET body = ? WHERE seq = ?", (literal, seq))
-    conn.commit()
-    conn.close()
+def _write(root: Path, rid: str, script: Script) -> RunRef:
+    """Write a hand-built log format 0.4.0 run (fixed handles and clocks, so the
+    screenshots are deterministic) and return its RunRef."""
+    ch = create_channel(rid, root=root, backend="sqlite")
+    write(ch, script.records)
+    ch.close()
+    return (rid, str(root), "sqlite")
 
 
-def _ch(root: Path, rid: str):
-    return create_channel(rid, root=root, backend="sqlite")
+def _training(
+    t0: float, t1: float, commits: int, *, handle: str, loss: float | None = None
+) -> Script:
+    """A claim at t0 and `commits` commits spread up to t1, the last committing `loss`."""
+    s = Script()
+    s.started(t0, handle)
+    for i in range(commits):
+        t = t0 + (t1 - t0) * (i + 1) / commits
+        if loss is not None and i == commits - 1:
+            s.value("loss", loss, t)
+        s.commit(t)
+    return s
 
 
 async def capture(
@@ -70,49 +83,26 @@ async def capture(
 
 
 def _seed_hero(root: Path) -> list[RunRef]:
-    c = _ch(root, "train-mnist")  # live + metric
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
-    c.close()
-    c = _ch(root, "train-cifar")  # stale
-    c.send({"handle": "local://h/2", "t": 60.0}, topic="lifecycle.started")
-    c.send({"step": 780, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
-    c.close()
-    c = _ch(root, "train-resnet")  # done (completed)
-    c.send({"handle": "local://h/3", "t": 50.0}, topic="lifecycle.started")
-    c.send({"step": 5000, "consumed_seq": 0, "t": 200.0}, topic="lifecycle.heartbeat")
-    c.send(
-        {"completed": True, "error": None, "final_step": 5000, "t": 205.0},
-        topic="lifecycle.stopped",
-    )
-    c.close()
-    c = _ch(root, "sweep-11")  # errored
-    c.send({"handle": "local://h/4", "t": 100.0}, topic="lifecycle.started")
-    c.send({"step": 300, "consumed_seq": 0, "t": 180.0}, topic="lifecycle.heartbeat")
-    c.send(
-        {"completed": False, "error": "CUDA OOM", "final_step": 300, "t": 185.0},
-        topic="lifecycle.stopped",
-    )
-    c.close()
-    c = _ch(root, "sweep-07")  # live + undischarged stop -> ■1
-    c.send({"handle": "local://h/5", "t": 294.0}, topic="lifecycle.started")
-    c.send({"step": 22, "consumed_seq": 0, "t": 298.0}, topic="lifecycle.heartbeat")
-    c.send({}, topic="control.stop", request_id="webui:stop1")
-    c.close()
-    c = _ch(root, "queued-run")  # pending (subscribed, not started)
-    c.send({"schedule": {}, "names": ["loss"]}, topic="control.subscribe", request_id="webui:sub1")
-    c.close()
+    mnist = _training(280.0, 292.0, 1450, handle="local://h/1", loss=0.0123)  # live + metric
+    cifar = _training(60.0, 140.0, 780, handle="local://h/2")  # held, gone quiet -> stale
+    resnet = _training(50.0, 200.0, 5000, handle="local://h/3")
+    resnet.stopped(205.0, completed=True)  # done (completed)
+    sweep11 = _training(100.0, 180.0, 300, handle="local://h/4")
+    sweep11.stopped(185.0, completed=False, error="CUDA OOM")  # errored, the worker's own exit
+    sweep03 = _training(90.0, 150.0, 410, handle="local://h/6")
+    sweep03.died(Outcome.KILLED, "slurm:TIMEOUT", 260.0)  # no exit: a death report ends it
+    sweep07 = _training(294.0, 298.0, 22, handle="local://h/5")
+    sweep07.stop("webui:stop1")  # live + undischarged stop -> ■1
+    queued = Script()  # pending: subscribed, nothing claimed yet
+    queued.subscribe("webui:sub1", "loss", {"every": {"commits": 1}})
     return [
-        (r, str(root), "sqlite")
-        for r in (
-            "train-mnist",
-            "train-cifar",
-            "train-resnet",
-            "sweep-11",
-            "sweep-07",
-            "queued-run",
-        )
+        _write(root, "train-mnist", mnist),
+        _write(root, "train-cifar", cifar),
+        _write(root, "train-resnet", resnet),
+        _write(root, "sweep-11", sweep11),
+        _write(root, "sweep-03", sweep03),
+        _write(root, "sweep-07", sweep07),
+        _write(root, "queued-run", queued),
     ]
 
 
@@ -128,18 +118,15 @@ async def scene_table(out_dir: Path) -> Path:
         t.cursor_type = "none"
 
     return await capture(
-        app, out_dir / "table.png", size=(108, 10), before=before, title="runstate-tui — sweep"
+        app, out_dir / "table.png", size=(108, 11), before=before, title="runstate-tui — sweep"
     )
 
 
 async def scene_single(out_dir: Path) -> Path:
     root = Path(tempfile.mkdtemp())
-    c = _ch(root, "train-mnist")  # one healthy live run
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
-    c.close()
-    ref: RunRef = ("train-mnist", str(root), "sqlite")
+    ref = _write(  # one healthy live run
+        root, "train-mnist", _training(280.0, 292.0, 1450, handle="local://h/1", loss=0.0123)
+    )
     app = SingleRunApp(ref, Env(clock=lambda: NOW, objective="loss"), tick_interval=999)
     return await capture(
         app, out_dir / "single.png", size=(104, 4), title="runstate-tui — single run"
@@ -152,33 +139,30 @@ async def scene_integrity(out_dir: Path) -> Path:
     # Realistic run names — the STATUS column + the colored dot carry the integrity state,
     # NOT the run name (the `run` column is just the run_id; naming files after their state
     # would misleadingly imply a name<->status coupling that does not exist).
-    c = _ch(root, "train-gpt2")  # byte-torn hb -> corrupt (⚠⚠ + red dot)
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 10, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.close()
-    _corrupt(root, "train-gpt2", 2, "{not json")
+    _write(root, "train-gpt2", _training(280.0, 292.0, 10, handle="local://h/1"))
+    corrupt_seq(root, "train-gpt2", 2)  # a byte-torn commit -> corrupt (⚠⚠ + red dot)
 
-    # not a sqlite database at all -- attach_channel's records probe raises
-    # sqlite3.DatabaseError, caught by open_and_fold's _OPEN_ERRORS -> unreadable (red
-    # dot, no marker). Distinct from a foreign *valid* sqlite db, which attach_channel
-    # now safely reads as `missing` (no `log` table -> RunNotFound) leaving it
-    # byte-identical -- the old mutate-on-open gap is fixed (pinned in
-    # tests/scenarios/test_fold_plane.py, the foreign-valid-db test).
-    (root / "eval-glue.db").write_bytes(b"this is not a sqlite database")  # -> unreadable (red dot)
+    # not a sqlite database at all, at the current format's address -- attach_channel's
+    # records probe raises sqlite3.DatabaseError, caught by open_and_fold's _OPEN_ERRORS ->
+    # unreadable (red dot, no marker). Distinct from a foreign *valid* sqlite db, which
+    # attach_channel safely reads as `missing` (no `log` table -> RunNotFound) leaving it
+    # byte-identical (pinned in tests/scenarios/test_fold_plane.py, the foreign-valid-db test).
+    log_path(root, "eval-glue").write_bytes(b"this is not a sqlite database")
 
     # "finetune-t5": its .db is never created -> missing: grey dot, no marker.
 
-    c = _ch(
-        root, "sweep-lr9"
-    )  # started + hb + value, then the value body -> alien int -> live + malformed ⚠
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 10, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.send({"value": 0.5, "step": 10, "t": 292.0}, topic="value", name="loss")
-    c.close()
-    _corrupt(root, "sweep-lr9", 3, "42")
+    # a run whose log is still log format 0.3.0: runstate refuses it at the open, by design,
+    # naming `runstate migrate` -> a loud format row (⚠⚠ + red dot), never a crash.
+    _write(root, "bert-base", _training(100.0, 200.0, 40, handle="local://h/2"))
+    move_log(root, "bert-base", to=log_path(root, "bert-base", version="0.3.0"))
+
+    # live, with its committed loss value's body replaced by an alien int -> live + malformed ⚠
+    _write(root, "sweep-lr9", _training(280.0, 292.0, 10, handle="local://h/1", loss=0.5))
+    corrupt_seq(root, "sweep-lr9", 11, literal="42")
 
     refs: list[RunRef] = [
-        (r, str(root), "sqlite") for r in ("train-gpt2", "eval-glue", "finetune-t5", "sweep-lr9")
+        (r, str(root), "sqlite")
+        for r in ("train-gpt2", "eval-glue", "finetune-t5", "bert-base", "sweep-lr9")
     ]
     app = MultiRunApp(
         explicit_resolver(refs), Env(clock=lambda: NOW, objective="loss"), tick_interval=999
@@ -191,7 +175,7 @@ async def scene_integrity(out_dir: Path) -> Path:
     return await capture(
         app,
         out_dir / "integrity.png",
-        size=(106, 8),
+        size=(106, 9),
         before=before,
         title="runstate-tui — integrity",
     )
@@ -199,13 +183,11 @@ async def scene_integrity(out_dir: Path) -> Path:
 
 async def scene_drilldown(out_dir: Path) -> Path:
     root = Path(tempfile.mkdtemp())
-    c = _ch(root, "train-mnist")  # a rich run: hb + value + a subscribe + an undischarged stop
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
-    c.send({"schedule": {}, "names": ["loss"]}, topic="control.subscribe", request_id="webui:sub1")
-    c.send({}, topic="control.stop", request_id="webui:stop1")
-    c.close()
+    # a rich run: commits + a loss value + a subscription + an undischarged stop
+    rich = _training(280.0, 292.0, 1450, handle="local://h/1", loss=0.0123)
+    rich.subscribe("webui:sub1", "loss", {"every": {"commits": 1}})
+    rich.stop("webui:stop1")
+    _write(root, "train-mnist", rich)
     ref: RunRef = ("train-mnist", str(root), "sqlite")
     app = MultiRunApp(
         explicit_resolver([ref]), Env(clock=lambda: NOW, objective="loss"), tick_interval=999
@@ -227,11 +209,7 @@ async def scene_drilldown(out_dir: Path) -> Path:
 
 async def scene_stop(out_dir: Path) -> Path:
     root = Path(tempfile.mkdtemp())
-    c = _ch(root, "train-mnist")  # a live run
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
-    c.close()
+    _write(root, "train-mnist", _training(280.0, 292.0, 1450, handle="local://h/1", loss=0.0123))
     ref: RunRef = ("train-mnist", str(root), "sqlite")
     app = SingleRunApp(ref, Env(clock=lambda: NOW, objective="loss"), tick_interval=999)
 
@@ -247,31 +225,14 @@ async def scene_grouped(out_dir: Path) -> Path:
     root = Path(tempfile.mkdtemp())
     # Four cells across two scenarios; the resolver supplies (RunRef, attrs) and the table sections
     # on `scenario` (the group) while the `run` column shows `variant` (the non-group attr = label).
-    c = _ch(root, "run-a")  # en-ru-16M / fb_5k -- live + loss
-    c.send({"handle": "local://h/1", "t": 280.0}, topic="lifecycle.started")
-    c.send({"step": 1450, "consumed_seq": 0, "t": 292.0}, topic="lifecycle.heartbeat")
-    c.send({"value": 0.0123, "step": 1450, "t": 292.0}, topic="value", name="loss")
-    c.close()
-    c = _ch(root, "run-b")  # en-ru-16M / fb_10k -- done
-    c.send({"handle": "local://h/2", "t": 50.0}, topic="lifecycle.started")
-    c.send({"step": 5000, "consumed_seq": 0, "t": 200.0}, topic="lifecycle.heartbeat")
-    c.send(
-        {"completed": True, "error": None, "final_step": 5000, "t": 205.0},
-        topic="lifecycle.stopped",
-    )
-    c.close()
-    c = _ch(root, "run-c")  # fr-en-4M / fb_5k -- stale
-    c.send({"handle": "local://h/3", "t": 60.0}, topic="lifecycle.started")
-    c.send({"step": 780, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
-    c.close()
-    c = _ch(root, "run-d")  # fr-en-4M / fb_10k -- errored
-    c.send({"handle": "local://h/4", "t": 100.0}, topic="lifecycle.started")
-    c.send({"step": 300, "consumed_seq": 0, "t": 180.0}, topic="lifecycle.heartbeat")
-    c.send(
-        {"completed": False, "error": "CUDA OOM", "final_step": 300, "t": 185.0},
-        topic="lifecycle.stopped",
-    )
-    c.close()
+    _write(root, "run-a", _training(280.0, 292.0, 1450, handle="local://h/1", loss=0.0123))
+    done = _training(50.0, 200.0, 5000, handle="local://h/2")  # en-ru-16M / fb_10k -- done
+    done.stopped(205.0, completed=True)
+    _write(root, "run-b", done)
+    _write(root, "run-c", _training(60.0, 140.0, 780, handle="local://h/3"))  # fr-en-4M -- stale
+    oom = _training(100.0, 180.0, 300, handle="local://h/4")  # fr-en-4M / fb_10k -- errored
+    oom.stopped(185.0, completed=False, error="CUDA OOM")
+    _write(root, "run-d", oom)
     items = [
         (("run-a", str(root), "sqlite"), {"scenario": "en-ru-16M", "variant": "fb_5k"}),
         (("run-b", str(root), "sqlite"), {"scenario": "en-ru-16M", "variant": "fb_10k"}),

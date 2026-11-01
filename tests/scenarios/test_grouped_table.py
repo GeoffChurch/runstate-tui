@@ -10,11 +10,15 @@ from textual.widgets import DataTable
 
 from runstate_tui.env import Env
 from runstate_tui.multirun import MultiRunApp
+from tests.records import Script, write
 
 
 def _seed(tmp_path, run_id, t=100.0):
+    """A claimed run (log format 0.4.0): its `started` at t, no commits yet."""
     ch = create_channel(run_id, root=tmp_path, backend="sqlite")
-    ch.send({"handle": "h", "t": t}, topic="lifecycle.started")
+    s = Script()
+    s.started(t, "h")
+    write(ch, s.records)
     ch.close()
     return (run_id, str(tmp_path), "sqlite")
 

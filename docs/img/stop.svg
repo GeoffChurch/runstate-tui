@@ -19,47 +19,47 @@
         font-weight: 700;
     }
 
-    .terminal-2737843982-matrix {
+    .terminal-796667741-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-2737843982-title {
+    .terminal-796667741-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-2737843982-r1 { fill: #e0e0e0 }
-.terminal-2737843982-r2 { fill: #646464 }
-.terminal-2737843982-r3 { fill: #c5c8c6 }
+    .terminal-796667741-r1 { fill: #e0e0e0 }
+.terminal-796667741-r2 { fill: #646464 }
+.terminal-796667741-r3 { fill: #c5c8c6 }
     </style>
 
     <defs>
-    <clipPath id="terminal-2737843982-clip-terminal">
+    <clipPath id="terminal-796667741-clip-terminal">
       <rect x="0" y="0" width="1267.8" height="96.6" />
     </clipPath>
-    <clipPath id="terminal-2737843982-line-0">
+    <clipPath id="terminal-796667741-line-0">
     <rect x="0" y="1.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2737843982-line-1">
+<clipPath id="terminal-796667741-line-1">
     <rect x="0" y="25.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2737843982-line-2">
+<clipPath id="terminal-796667741-line-2">
     <rect x="0" y="50.3" width="1268.8" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="145.6" rx="8"/><text class="terminal-2737843982-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">runstate-tui&#160;—&#160;stop</text>
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="145.6" rx="8"/><text class="terminal-796667741-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">runstate-tui&#160;—&#160;stop</text>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-2737843982-clip-terminal)">
-    <rect fill="#121212" x="0" y="1.5" width="305" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="305" y="1.5" width="329.4" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="634.4" y="1.5" width="634.4" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="25.9" width="0" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="25.9" width="1268.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="50.3" width="1268.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="74.7" width="1268.8" height="24.65" shape-rendering="crispEdges"/>
-    <g class="terminal-2737843982-matrix">
-    <text class="terminal-2737843982-r1" x="0" y="20" textLength="305" clip-path="url(#terminal-2737843982-line-0)">Stop&#160;run&#160;train-mnist?&#160;y/n</text><text class="terminal-2737843982-r2" x="305" y="20" textLength="329.4" clip-path="url(#terminal-2737843982-line-0)">loss=0.0123&#160;@&#160;1450&#160;&#160;ran&#160;20s</text><text class="terminal-2737843982-r3" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-2737843982-line-0)">
-</text><text class="terminal-2737843982-r3" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-2737843982-line-1)">
-</text><text class="terminal-2737843982-r3" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-2737843982-line-2)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-796667741-clip-terminal)">
+    <rect fill="#121212" x="0" y="1.5" width="305" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="305" y="1.5" width="366" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="671" y="1.5" width="597.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="25.9" width="0" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="25.9" width="1268.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="50.3" width="1268.8" height="24.65" shape-rendering="crispEdges"/><rect fill="#121212" x="0" y="74.7" width="1268.8" height="24.65" shape-rendering="crispEdges"/>
+    <g class="terminal-796667741-matrix">
+    <text class="terminal-796667741-r1" x="0" y="20" textLength="305" clip-path="url(#terminal-796667741-line-0)">Stop&#160;run&#160;train-mnist?&#160;y/n</text><text class="terminal-796667741-r2" x="305" y="20" textLength="366" clip-path="url(#terminal-796667741-line-0)">o&#160;&#160;loss=0.0123&#160;@&#160;1450&#160;&#160;ran&#160;20s</text><text class="terminal-796667741-r3" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-796667741-line-0)">
+</text><text class="terminal-796667741-r3" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-796667741-line-1)">
+</text><text class="terminal-796667741-r3" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-796667741-line-2)">
 </text>
     </g>
     </g>

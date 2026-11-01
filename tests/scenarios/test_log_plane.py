@@ -50,9 +50,10 @@ class _Host(App[None]):
 
 def _sqlite_run(tmp_path, run_id, records):
     """Write `records` (3- or 4-tuples: body, topic, name[, request_id]) to a fresh
-    sqlite-backed run and return its RunRef `(run_id, root, "sqlite")` -- a real file
-    is needed here (not `build_log`'s in-memory channel) so later steps can reopen a
-    writer, `corrupt_seq`, or hold a live connection across the test."""
+        sqlite-backed run and return its RunRef `(run_id, root, "sqlite")` (log format 0.4.0
+    bodies: a heartbeat names its claim, seq 1's `started`) -- a real file
+        is needed here (not `build_log`'s in-memory channel) so later steps can reopen a
+        writer, `corrupt_seq`, or hold a live connection across the test."""
     writer = create_channel(run_id, root=tmp_path, backend="sqlite")
     for record in records:
         body, topic, name, *rest = record
@@ -113,9 +114,13 @@ async def _cold_open_full_drain(tmp_path):
         tmp_path,
         "cold",
         [
-            ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
-            ({"step": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
-            ({"step": 2, "consumed_seq": 0, "t": 3.0}, "lifecycle.heartbeat", None),
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            ),
+            ({"claim_seq": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
+            ({"claim_seq": 1, "consumed_seq": 0, "t": 3.0}, "lifecycle.heartbeat", None),
         ],
     )
     app = _Host()
@@ -137,7 +142,17 @@ def test_append_before_tick_included(tmp_path):
 
 
 async def _append_before_tick_included(tmp_path):
-    ref = _sqlite_run(tmp_path, "abt", [({"handle": "h1", "t": 1.0}, "lifecycle.started", None)])
+    ref = _sqlite_run(
+        tmp_path,
+        "abt",
+        [
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            )
+        ],
+    )
     app = _Host()
     async with app.run_test() as pilot:
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
@@ -145,7 +160,7 @@ async def _append_before_tick_included(tmp_path):
         await _settle(pilot, screen)
         assert screen._cursor == 1
 
-        hb = {"step": 1, "consumed_seq": 0, "t": 2.0}
+        hb = {"claim_seq": 1, "consumed_seq": 0, "t": 2.0}
         _append(tmp_path, "abt", hb, topic="lifecycle.heartbeat")
         await advance_tick(pilot, screen)  # the append landed BEFORE this tick
         rows = _rows(screen)
@@ -159,7 +174,17 @@ def test_tick_before_append_deferred(tmp_path):
 
 
 async def _tick_before_append_deferred(tmp_path):
-    ref = _sqlite_run(tmp_path, "tba", [({"handle": "h1", "t": 1.0}, "lifecycle.started", None)])
+    ref = _sqlite_run(
+        tmp_path,
+        "tba",
+        [
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            )
+        ],
+    )
     app = _Host()
     async with app.run_test() as pilot:
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
@@ -171,7 +196,7 @@ async def _tick_before_append_deferred(tmp_path):
         assert screen._cursor == 1
         assert len(_rows(screen)) == 1
 
-        hb = {"step": 1, "consumed_seq": 0, "t": 2.0}
+        hb = {"claim_seq": 1, "consumed_seq": 0, "t": 2.0}
         _append(tmp_path, "tba", hb, topic="lifecycle.heartbeat")
         # the two-directional delta boundary: BETWEEN the append and the next tick,
         # the window and cursor must NOT have moved just because a record landed on disk.
@@ -201,7 +226,7 @@ async def _batch_append_in_one_gap(tmp_path):
             _append(
                 tmp_path,
                 "batch",
-                {"step": step, "consumed_seq": 0, "t": float(step)},
+                {"claim_seq": 1, "consumed_seq": 0, "t": float(step)},
                 topic="lifecycle.heartbeat",
             )
         await advance_tick(pilot, screen)  # all 5 land in ONE gap before this tick
@@ -220,7 +245,7 @@ def test_ring_eviction(tmp_path):
 
 async def _ring_eviction(tmp_path):
     records = [
-        ({"step": i, "consumed_seq": 0, "t": float(i)}, "lifecycle.heartbeat", None)
+        ({"claim_seq": 1, "consumed_seq": 0, "t": float(i)}, "lifecycle.heartbeat", None)
         for i in range(8)
     ]
     ref = _sqlite_run(tmp_path, "ring", records)
@@ -251,7 +276,17 @@ def test_one_envelope_is_one_row(tmp_path):
 
 
 async def _one_envelope_is_one_row(tmp_path):
-    ref = _sqlite_run(tmp_path, "nl", [({"handle": "h1", "t": 1.0}, "launcher.launched", None)])
+    ref = _sqlite_run(
+        tmp_path,
+        "nl",
+        [
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "launcher.launched",
+                None,
+            )
+        ],
+    )
     corrupt_seq(tmp_path, "nl", 1, literal=json.dumps("line one\nline two"))
     app = _Host()
     async with app.run_test() as pilot:
@@ -288,8 +323,12 @@ async def _byte_torn_in_delta(tmp_path):
         tmp_path,
         "torndelta",
         [
-            ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
-            ({"step": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            ),
+            ({"claim_seq": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
         ],
     )
     app = _Host()
@@ -324,8 +363,12 @@ async def _card_status_flips_live_to_terminal(tmp_path):
         tmp_path,
         "flips",
         [
-            ({"handle": "h1", "t": 1.0}, "lifecycle.started", None),
-            ({"step": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            ),
+            ({"claim_seq": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat", None),
         ],
     )
     app = _Host()
@@ -339,7 +382,17 @@ async def _card_status_flips_live_to_terminal(tmp_path):
         _append(
             tmp_path,
             "flips",
-            {"completed": True, "error": None, "final_step": 1, "t": 3.0},
+            {
+                "completed": True,
+                "error": None,
+                "claim_seq": 1,
+                "honored": [],
+                "parent": None,
+                "values": [],
+                "fired": [],
+                "expired": [],
+                "t": 3.0,
+            },
             topic="lifecycle.stopped",
         )
         await advance_tick(pilot, screen)
@@ -354,7 +407,15 @@ def test_re_entry_resets_cursor(tmp_path):
 
 async def _re_entry_resets_cursor(tmp_path):
     ref = _sqlite_run(
-        tmp_path, "reentry", [({"handle": "h1", "t": 1.0}, "lifecycle.started", None)]
+        tmp_path,
+        "reentry",
+        [
+            (
+                {"handle": "h1", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            )
+        ],
     )
     app = _Host()
     async with app.run_test() as pilot:
@@ -368,7 +429,7 @@ async def _re_entry_resets_cursor(tmp_path):
         await pilot.pause()
 
         # a record lands while NO screen is watching this ref
-        hb = {"step": 1, "consumed_seq": 0, "t": 2.0}
+        hb = {"claim_seq": 1, "consumed_seq": 0, "t": 2.0}
         _append(tmp_path, "reentry", hb, topic="lifecycle.heartbeat")
 
         screen2 = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
@@ -387,7 +448,7 @@ def test_sqlite_wal_held_writer(held_writer_sqlite_run):
 
 async def _sqlite_wal_held_writer(held_writer_sqlite_run):
     ref, send = held_writer_sqlite_run
-    send({"handle": "h1", "t": 1.0}, "lifecycle.started")
+    send({"handle": "h1", "t": 1.0, "resume_from": None, "sources": []}, "lifecycle.started")
     app = _Host()
     async with app.run_test() as pilot:
         screen = DrillDownScreen(ref, Env(clock=lambda: 10.0), tick_interval=999.0)
@@ -395,7 +456,7 @@ async def _sqlite_wal_held_writer(held_writer_sqlite_run):
         await _settle(pilot, screen)  # a fresh reader connection sees the held writer's commit
         assert len(_rows(screen)) == 1
 
-        send({"step": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat")
+        send({"claim_seq": 1, "consumed_seq": 0, "t": 2.0}, "lifecycle.heartbeat")
         await advance_tick(pilot, screen)  # each tick opens its OWN fresh reader
         assert len(_rows(screen)) == 2
         assert screen._cursor == 2

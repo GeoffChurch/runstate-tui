@@ -5,6 +5,8 @@ import pytest
 from runstate import create_channel
 
 from runstate_tui.env import Env
+from tests.helpers import log_path
+from tests.records import Script
 
 _ids = count()
 
@@ -73,13 +75,17 @@ def answer_on_sleep():
 
 @pytest.fixture
 def foreign_db(tmp_path):
-    """A VALID sqlite file at `<tmp_path>/ghost.db` with an alien (non-runstate)
-    schema, written directly (never through a runstate locator) — the "real sqlite
-    file, wrong shape" case distinct from a corrupt/non-sqlite file. Under
-    `attach_channel` this now reads as `missing` (no `log` table -> RunNotFound)
-    and is left byte-identical (the old open-mutates-foreign-db bug is fixed)."""
+    """A VALID sqlite file at the current format's address, `<tmp_path>/v0.4.0/ghost.db`,
+    with an alien (non-runstate) schema, written directly (never through a runstate
+    locator) — the "real sqlite file, wrong shape" case distinct from a corrupt/non-sqlite
+    file. Under `attach_channel` this reads as `missing` (no `log` table -> RunNotFound)
+    and is left byte-identical (the old open-mutates-foreign-db bug is fixed). (At the
+    unversioned legacy address the same file reads as an unversioned log instead: the
+    format check is by address, and never sniffs contents.)"""
     run_id = "ghost"
-    conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))
+    path = log_path(tmp_path, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
     try:
         conn.execute("CREATE TABLE unrelated(id, note)")
         conn.execute("INSERT INTO unrelated VALUES (1, 'not a runstate log')")
@@ -107,25 +113,25 @@ def held_writer_sqlite_run(tmp_path):
 
 @pytest.fixture
 def rich_run():
-    """A live run with an episode, a heartbeat, a value, an undischarged stop, and
-    live demand. Built directly (not via build_log) because control.subscribe /
-    control.stop correlate on request_id, which build_log's (body, topic, name)
-    triples have no slot for."""
+    """A live run with an episode, seven commits, a value, an undischarged stop, and
+    live demand (a pure demand: a subscription that targets no source, with an `until`,
+    the only schedule a pure demand takes -- subscription-v0.4). Log format 0.4.0."""
     opened = []  # every channel handle this fixture opens, closed in teardown below
 
     def _build():
         run_id = f"rich-{next(_ids)}"
         writer = create_channel(run_id, backend="memory")
         opened.append(writer)
-        writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
-        writer.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
-        writer.send({"value": 0.03, "step": 7, "t": 140.0}, topic="value", name="loss")
-        writer.send(
-            {"schedule": {}, "names": ["loss"]},
-            topic="control.subscribe",
-            request_id="webui:sub1",
-        )
-        writer.send({}, topic="control.stop", request_id="webui:stop1")
+        s = Script()
+        s.started(100.0)
+        for i in range(6):
+            s.commit(101.0 + i)
+        s.value("loss", 0.03, 140.0)
+        s.commit(140.0)
+        s.subscribe("webui:sub1", None, {"until": {"commits": 100}})
+        s.stop("webui:stop1")
+        for body, topic, name, rid in s.records:
+            writer.send(body, topic=topic, name=name, request_id=rid)
         reader = create_channel(run_id, backend="memory")  # a fresh reader on the same log
         opened.append(reader)
         return reader
@@ -142,11 +148,11 @@ def torn_sqlite_channel(tmp_path):
     def _build(records, torn_seq):
         run_id = "torn"
         writer = create_channel(run_id, root=tmp_path, backend="sqlite")
-        for body, topic, name in records:
-            writer.send(body, topic=topic, name=name)
+        for body, topic, name, *rest in records:
+            writer.send(body, topic=topic, name=name, request_id=rest[0] if rest else None)
         writer.close()  # closed before the file is corrupted below; nothing to track
         # test tooling only (not runtime): plant an un-decodable body at torn_seq
-        conn = sqlite3.connect(str(tmp_path / f"{run_id}.db"))
+        conn = sqlite3.connect(str(log_path(tmp_path, run_id)))
         conn.execute("UPDATE log SET body = ? WHERE seq = ?", ("{not json", torn_seq))
         conn.commit()
         conn.close()
