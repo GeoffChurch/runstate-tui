@@ -10,8 +10,8 @@ see a table.
 No consumer's run logs are on Postgres yet. mycooc's coordination server holds its scheduler's job
 tables (its Postgres plan's stage 2), but its runs still write sqlite channels
 (`RUNSTATE_CHANNEL_BACKEND=sqlite`). Stage 3 of that plan, live channels on runstate's
-`PostgresChannel`, is what moves them, and from then on `glob` cannot find a live mycooc run. **Build
-it when mycooc's stage 3 lands**, against a real server: runstate's test suite starts throwaway
+`PostgresChannel`, is what moves them ([mycooc#2](https://github.com/GeoffChurch/mycooc/issues/2)),
+and from then on `glob` cannot find a live mycooc run. **Build it when mycooc's stage 3 lands**, against a real server: runstate's test suite starts throwaway
 ones, and so can this repo's.
 
 ## Open

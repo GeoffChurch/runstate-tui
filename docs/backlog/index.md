@@ -35,7 +35,8 @@ describes what is still open, not what already landed; git history carries the p
   frame under 0.4.0's held folds (~35–45 ms per median mycooc run). Open: retain folds past their
   channel, spread the first frame, and an upstream O(1) frontier.
 - [postgres-resolver](postgres-resolver.md) — discover runs whose logs live on a Postgres server.
-  Gated on mycooc's stage 3 (live channels on `PostgresChannel`): until then no consumer's runs are
+  Gated on mycooc's stage 3 ([mycooc#2](https://github.com/GeoffChurch/mycooc/issues/2): live channels on
+  `PostgresChannel`): until then no consumer's runs are
   there, and from then on `glob` cannot see a live mycooc run.
 - [showcase-gifs](showcase-gifs.md) — animated usage GIFs, generated from the same headless
   fixture-basis machinery that renders the static screenshots.
