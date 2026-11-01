@@ -11,6 +11,7 @@ from runstate import (
     Channel,
     Commits,
     Envelope,
+    Head,
     HeadFold,
     LastElement,
     LiveDemand,
@@ -215,29 +216,40 @@ def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | No
 
 def read_lineage(
     channel: Channel, folds: RunFolds
-) -> tuple[int | None, Reading | None, Issue | None]:
+) -> tuple[int | None, Reading | None, list[Issue]]:
     """The frontier and the objective's reading, both at ONE head resolved this poll, so
-    they agree. The frontier is `count(Commits(), head)`, None for the empty lineage; the
-    reading is the objective's last element in lineage order, with the commit count at the
-    node that committed it. A head that raises (a malformed node on the newest claim)
-    degrades both to None under one MALFORMED issue."""
+    they agree. The frontier is `count(Commits(), head)` (0 on the empty lineage); the
+    reading is the objective's last element in lineage order, with the commit count at
+    the node that committed it. A head that raises (a malformed node on the newest claim)
+    degrades both to None; a value that raises (a malformed body) degrades the reading
+    alone, so the frontier survives it -- one MALFORMED issue per failed read."""
+    issues: list[Issue] = []
 
-    def _read(ch: Channel) -> tuple[int | None, Reading | None]:
+    def _frontier(ch: Channel) -> tuple[Head, int]:
         head = folds.head.poll(ch)
-        count = folds.commits.poll(ch, head)
-        frontier = None if head.node is None else count
-        if folds.objective is None:
-            return frontier, None
-        element = folds.objective.last.poll(ch, head)
-        if element is None:
-            return frontier, None
-        at = folds.commits.at(ch, element.node, w=head.w)
-        return frontier, Reading(name=folds.objective.name, value=element.value, commits=at)
+        return head, folds.commits.poll(ch, head)
 
-    got, issue = guarded(_read, channel)
+    got, head_issue = guarded(_frontier, channel)
+    if head_issue is not None:
+        issues.append(head_issue)
     if got is None:
-        return None, None, issue
-    return got[0], got[1], issue
+        return None, None, issues
+    head, frontier = got
+    objective = folds.objective
+    if objective is None:
+        return frontier, None, issues
+
+    def _reading(ch: Channel) -> Reading | None:
+        element = objective.last.poll(ch, head)
+        if element is None:
+            return None
+        at = folds.commits.at(ch, element.node, w=head.w)
+        return Reading(name=objective.name, value=element.value, commits=at)
+
+    reading, value_issue = guarded(_reading, channel)
+    if value_issue is not None:
+        issues.append(value_issue)
+    return frontier, reading, issues
 
 
 def status_fold(channel: Channel, env: Env, folds: RunFolds) -> Row:
@@ -247,9 +259,8 @@ def status_fold(channel: Channel, env: Env, folds: RunFolds) -> Row:
     status, freshness, status_issues = reconcile_status(channel, env, now)
     issues.extend(status_issues)
 
-    frontier, value, lineage_issue = read_lineage(channel, folds)
-    if lineage_issue is not None:
-        issues.append(lineage_issue)
+    frontier, value, lineage_issues = read_lineage(channel, folds)
+    issues.extend(lineage_issues)
 
     elapsed, elapsed_issue = read_elapsed(channel, now)
     if elapsed_issue is not None:

@@ -194,7 +194,7 @@ class Reading(NamedTuple):
 @dataclass(frozen=True)
 class Row:
     status: Status
-    frontier: int | None  # commits on the latest claim's lineage; None for an empty lineage
+    frontier: int | None  # commits on the latest claim's lineage; None when unreadable
     freshness: float | None  # age = max(0, now - last_activity)
     value: Reading | None  # the objective's last element on the lineage
     elapsed: float | None  # now - first started.t; None if no started
