@@ -3,16 +3,29 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable
+from typing import NamedTuple
 
-from runstate import RunNotFound, attach_channel
-from runstate.channel import Channel, Envelope
+from runstate import (
+    Channel,
+    Envelope,
+    LogFormatError,
+    LogFormatMismatch,
+    LogFormatMissing,
+    RunNotFound,
+    attach_channel,
+)
 
 from .env import Env
-from .fold import locate_torn_seq, status_fold
-from .resolver import Resolver, RunRef, const_resolver
-from .types import Issue, IssueKind, Row, Severity, Status
+from .fold import RunFolds, locate_torn_seq, status_fold
+from .resolver import Resolver, RunRef
+from .types import Issue, IssueKind, Row, Severity, Status, StatusKind
 
 _OPEN_ERRORS = (sqlite3.DatabaseError, sqlite3.OperationalError, PermissionError, OSError)
+
+# integrity verdicts that mean an open handle -- and the folds held beside it -- is no
+# good: the holder drops both, so the next tick cold-opens and folds from scratch
+# (self-healing detection; a holder keeps only healthy handles and folds).
+EVICT_KINDS = (StatusKind.CORRUPT, StatusKind.UNREADABLE)
 
 
 def _bare(status: Status) -> Row:
@@ -79,35 +92,107 @@ def _fold_error(exc: Exception) -> Row:
     )
 
 
-def fold_open_channel(channel: Channel, env: Env) -> Row:
+def _version(v: str) -> tuple[int, ...]:
+    """An X.Y.Z format version as a comparable tuple (runstate's `formats.parse` is not
+    public; the grammar is log-formats.md §3's)."""
+    return tuple(int(part) for part in v.split("."))
+
+
+class FormatError(NamedTuple):
+    """What a `LogFormatError` means to an operator: the format found (None for a log from
+    before versioned addresses), the short action the status cell shows, and the message
+    the issue carries -- runstate's own, which names the log and the exact command."""
+
+    found: str | None
+    action: str
+    message: str
+
+
+def describe_format_error(exc: LogFormatError) -> FormatError:
+    """runstate refuses a log in another format at the open, by design, and names the
+    action: `runstate migrate` for an older format, a runstate upgrade for a newer one,
+    onboarding then migrating for a log at the unversioned legacy address. A
+    `LogFormatMissing` message is runstate's multi-line onboarding script, so its issue
+    carries a one-line summary instead (the script stays in `Issue.detail`)."""
+    if isinstance(exc, LogFormatMismatch):
+        newer = _version(exc.found) > _version(exc.expected)
+        action = "upgrade runstate to read it" if newer else "migrate it (runstate migrate)"
+        return FormatError(exc.found, action, str(exc))
+    if isinstance(exc, LogFormatMissing):
+        action = "onboard it, then runstate migrate"
+        return FormatError(
+            None,
+            action,
+            f"{exc.where} predates versioned log formats: onboard it as format 0.2.0 "
+            "(runstate log-formats.md §7), then run `runstate migrate`",
+        )
+    # a LogFormatError subclass runstate adds later: render it by its own message
+    return FormatError(None, str(exc), str(exc))
+
+
+def _wrong_format(exc: LogFormatError) -> Row:
+    """A row for a run whose log is in a format this runstate does not read. The cockpit
+    shows it as a loud HIGH row (it cannot read the run at all), never as `missing` and
+    never as a crash. runstate's full instructions (the root, the exact command, the
+    onboarding loop) ride the issue's detail for the drill-down."""
+    found, action, message = describe_format_error(exc)
+    issue = Issue(
+        kind=IssueKind.LOG_FORMAT, severity=Severity.HIGH, message=message, detail=str(exc)
+    )
+    return Row(
+        status=Status.log_format(found, action),
+        frontier=None,
+        freshness=None,
+        value=None,
+        elapsed=None,
+        episode=None,
+        undischarged_stops=(),
+        live_demand=(),
+        issues=(issue,),
+    )
+
+
+def open_row_for(exc: Exception) -> Row:
+    """The row for a run `attach_channel` refused: no records -> `missing`, another
+    format -> the loud format row, corrupt/non-sqlite/unopenable -> `unreadable`. Raises
+    anything else, which is a bug the caller's fold-error containment reports."""
+    if isinstance(exc, RunNotFound):
+        return _bare(Status.missing())
+    if isinstance(exc, LogFormatError):
+        return _wrong_format(exc)
+    if isinstance(exc, _OPEN_ERRORS):
+        return _bare(Status.unreadable())
+    raise exc
+
+
+def fold_open_channel(channel: Channel, env: Env, folds: RunFolds) -> Row:
     """Fold an ALREADY-OPEN channel with the integrity guards, WITHOUT closing it.
     A byte-torn (json.JSONDecodeError) -> loud `corrupt` carrying the located seq; a
     substrate fault mid-read -> `unreadable`. open_and_fold closes in its own finally;
-    the pool keeps the handle and re-uses it next tick (folding fresh)."""
+    the pool keeps the handle and its folds and re-uses them next tick (folding only the
+    new records)."""
     try:
-        return status_fold(channel, env)
+        return status_fold(channel, env, folds)
     except json.JSONDecodeError:
         return _corrupt(locate_torn_seq(channel))
     except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError):
         return _bare(Status.unreadable())
 
 
-def open_and_fold(ref: RunRef, env: Env) -> Row:
+def open_and_fold(ref: RunRef, env: Env, folds: RunFolds) -> Row:
     run_id, root, backend = ref
     # attach_channel (never create_channel): observing a run must NOT fabricate a
     # phantom <run_id>.db, and must NOT schema-mutate a foreign valid sqlite db under a
     # stale pointer — both, plus a genuinely-empty run, are `RunNotFound` -> `missing`
-    # (a run exists iff it has records; spec channel-locators.md). Only corrupt/non-sqlite
-    # bytes still raise `sqlite3.DatabaseError` -> `unreadable`. This is strictly SAFER
-    # than the old stat-before-open, which could not catch the foreign-db mutation.
+    # (a run exists iff it has records; spec channel-locators.md). A log in another format
+    # raises a `LogFormatError` -> the loud format row. Only corrupt/non-sqlite bytes still
+    # raise `sqlite3.DatabaseError` -> `unreadable`.
     try:
         channel = attach_channel(run_id, root=root, backend=backend)
-    except RunNotFound:
-        return _bare(Status.missing())
-    except _OPEN_ERRORS:
-        return _bare(Status.unreadable())  # corrupt/non-sqlite/unopenable db
+    except (RunNotFound, LogFormatError, *_OPEN_ERRORS) as exc:
+        return open_row_for(exc)
     try:
-        return fold_open_channel(channel, env)
+        return fold_open_channel(channel, env, folds)
     finally:
         channel.close()
 
@@ -120,16 +205,17 @@ def read_log_delta(
     limit: int | None = None,
 ) -> list[Envelope]:
     """The raw log tail as a query: envelopes with seq > `after`, optionally narrowed
-    by `filter`. Missing/unreadable/substrate-fault/byte-torn -> [] (the header carries
-    the run's status, including the loud `corrupt` verdict, via render_single/
-    open_and_fold)."""
+    by `filter`. Missing/other-format/unreadable/substrate-fault/byte-torn -> [] (the
+    header carries the run's status, including the loud `corrupt` and format verdicts,
+    via render_single/open_and_fold)."""
     run_id, root, backend = ref
     # attach_channel (never create_channel): never fabricate a phantom db nor mutate a
-    # foreign one. A run with no records (missing/empty/foreign) raises `RunNotFound`;
-    # corrupt/non-sqlite raises a `_OPEN_ERRORS` member — both degrade the tail to [].
+    # foreign one. A run with no records (missing/empty/foreign) raises `RunNotFound`; a
+    # log in another format a `LogFormatError`; corrupt/non-sqlite a `_OPEN_ERRORS` member
+    # — each degrades the tail to [] (the header carries the loud verdict).
     try:
         channel = attach_channel(run_id, root=root, backend=backend)
-    except (RunNotFound, *_OPEN_ERRORS):
+    except (RunNotFound, LogFormatError, *_OPEN_ERRORS):
         return []
     try:
         got = channel.read(after=after, limit=limit)
@@ -151,22 +237,22 @@ def read_log_delta(
 def envelope_filter(text: str, hidden_families: set[str]) -> Callable[[Envelope], bool]:
     """Build a v1 log-filter predicate from the filter-bar text + the toggled-off
     (hidden) topic families. text: a plain substring matched against topic +
-    request_id (+ 'step>N' numeric bound over the body's 'step'). hidden_families:
+    request_id (+ 'seq>N', a numeric bound over the envelope's seq — the one position
+    every record carries; log format 0.4.0 records carry no `step`). hidden_families:
     topic families to HIDE (the toggled-off KNOWN families) — a topic whose family
-    is NOT in this set always shows, so launcher.* / any unclassified topic is never
+    is NOT in this set always shows, so supervisor.* / any unclassified topic is never
     silently dropped (the log streams every record). The daemon/upstream #15 will
     serve this as read(filter=…)."""
     text = text.strip()
-    stepbound: int | None = None
-    if text.startswith("step>") and text[5:].strip().isdigit():
-        stepbound = int(text[5:].strip())
+    seqbound: int | None = None
+    if text.startswith("seq>") and text[4:].strip().isdigit():
+        seqbound = int(text[4:].strip())
 
     def pred(e: Envelope) -> bool:
         if e.topic.split(".")[0] in hidden_families:  # subtractive: hide toggled-off known families
             return False
-        if stepbound is not None:
-            step = e.body.get("step") if isinstance(e.body, dict) else None
-            return isinstance(step, int) and step > stepbound
+        if seqbound is not None:
+            return e.seq > seqbound
         if text and text not in e.topic and text not in (e.request_id or ""):
             return False
         return True
@@ -175,12 +261,34 @@ def envelope_filter(text: str, hidden_families: set[str]) -> Callable[[Envelope]
 
 
 def render_table(resolver: Resolver, env: Env) -> list[Row]:
-    # `now` is re-sampled per row (once for the resolver, then again in each row's
-    # status_fold) — Stage 4 should capture `now` once per frame for frame-consistent
-    # freshness across the whole table.
-    return [open_and_fold(ref, env) for ref, _attrs in resolver(env.clock())]
+    """A one-shot table: every row folded cold, with fresh folds (the pure reads'
+    answers at O(log) each). The live table is `pool.fold_frame`, which holds the folds.
+    `now` is re-sampled per row; `fold_frame` captures it once per frame."""
+    return [
+        open_and_fold(ref, env, RunFolds.start(objective=env.objective))
+        for ref, _attrs in resolver(env.clock())
+    ]
+
+
+class HeldRun:
+    """One run observed across ticks by a screen that re-opens it each tick (the
+    single-run app, the drill-down card): it holds the run's folds, so a tick folds only
+    the records since the last, and drops them whenever the run reads corrupt or
+    unreadable, as the pool drops a handle (EVICT_KINDS). The single-run view is the table
+    at |I|=1 (spec §11): the same open_and_fold, the same folds."""
+
+    def __init__(self, ref: RunRef, env: Env) -> None:
+        self.ref = ref
+        self._env = env
+        self._folds = RunFolds.start(objective=env.objective)
+
+    def row(self) -> Row:
+        row = open_and_fold(self.ref, self._env, self._folds)
+        if row.status.kind in EVICT_KINDS:
+            self._folds = RunFolds.start(objective=self._env.objective)
+        return row
 
 
 def render_single(ref: RunRef, env: Env) -> Row:
     # the single-run view IS the table at |I|=1 — one code path, no bespoke screen (spec §11)
-    return render_table(const_resolver(ref), env)[0]
+    return HeldRun(ref, env).row()

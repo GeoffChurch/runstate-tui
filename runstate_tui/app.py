@@ -14,7 +14,7 @@ from .detail import DrillDownScreen
 from .env import Env
 from .format import format_row
 from .resolver import RunRef
-from .table import render_single
+from .table import HeldRun
 
 StopDispatch = Callable[[RunRef, str, float], StopOutcome]
 
@@ -46,6 +46,7 @@ class SingleRunApp(App[None]):
         super().__init__()
         self._ref = ref
         self._env = env
+        self._held = HeldRun(ref, env)  # the run's folds, held across ticks (O(new) a tick)
         self._tick_interval = tick_interval
         self._stop_timeout = stop_timeout
         self._stop_dispatch = stop_dispatch
@@ -71,7 +72,7 @@ class SingleRunApp(App[None]):
         # so only a truly-unclassifiable exception (a genuine bug) escapes and crashes
         # the cockpit rather than self-healing into a silent retry. A crash is not a
         # freeze — the app exits (§10 holds).
-        row = render_single(self._ref, self._env)
+        row = self._held.row()
         text = format_row(row)
         self.call_from_thread(self._show, text)  # query + update via call_from_thread
         self.call_from_thread(self.set_timer, self._tick_interval, self._tick)
@@ -91,7 +92,7 @@ class SingleRunApp(App[None]):
         if not confirmed:
             return  # the confirm gate declined — no stop is sent
         self._stop_in_flight = True
-        request_id = f"webui:{uuid.uuid4()}"
+        request_id = f"webui:{uuid.uuid4()}"  # the stop's name: non-empty, never reused
         self.query_one("#stop", Static).update("stopping…")
         # a DEDICATED thread for the handshake — never the fold worker, never
         # Textual's shared executor (spec §13): a slow fold must not starve stop.

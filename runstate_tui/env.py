@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
-from runstate.channel import Channel
+from runstate import Channel
 
 
 class Liveness(Enum):

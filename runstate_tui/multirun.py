@@ -18,7 +18,7 @@ from .pool import ChannelPool, Table, fold_frame
 from .resolver import Attrs, Resolver, RunRef, disambiguate, ref_key
 from .types import Row, Severity
 
-_COLUMNS = ("dot", "run", "status", "step", "age", "value", "elapsed", "!")
+_COLUMNS = ("dot", "run", "status", "commits", "age", "value", "elapsed", "!")
 
 # How long on_unmount waits for the owner thread to finish its in-flight fold before
 # giving up and LEAKING the pool (see on_unmount) rather than hanging quit forever on a
@@ -119,15 +119,11 @@ def _cells(row: Row, label: str) -> tuple[Text, str, str, str, str, str, str, Te
     traffic-light ● redundant with the `status` text cell (never the sole signal)."""
     dot = Text("●", style=status_color(row.status))
     status = row.status.label + (f": {row.status.detail}" if row.status.detail else "")
-    step = "" if row.frontier is None else str(row.frontier)
+    commits = "" if row.frontier is None else str(row.frontier)
     age = "" if row.freshness is None else f"{row.freshness:.0f}s"
-    if row.value is None:
-        value = ""
-    else:
-        name, val, vstep = row.value
-        value = f"{name}={val}" + (f"@{vstep}" if vstep is not None else "")
+    value = "" if row.value is None else f"{row.value.name}={row.value.value}@{row.value.commits}"
     elapsed = "" if row.elapsed is None else f"{row.elapsed:.0f}s"
-    return (dot, label, status, step, age, value, elapsed, _marker(row))
+    return (dot, label, status, commits, age, value, elapsed, _marker(row))
 
 
 class TableReady(Message):
