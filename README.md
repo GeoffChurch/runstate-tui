@@ -52,7 +52,7 @@ Point it at whatever you have — it picks the right view from the shape of the 
 | Target | What you get |
 |---|---|
 | `runstate-tui run.db` | one run, focused (single-run view) |
-| `runstate-tui runs/` | every `*.db` under a directory, recursively — live (glob) |
+| `runstate-tui runs/` | every run log under a directory, recursively — live (glob) |
 | `runstate-tui exp.json` | the runs listed in a manifest, each carrying attributes |
 | `runstate-tui a.db b.db …` | an explicit set of runs |
 
@@ -61,7 +61,20 @@ Add `--group-by <attr>` to section the table by a manifest attribute (e.g.
 manifest (or any multi-run target), not a single run.
 
 `--objective NAME` picks which reported value fills the value column — blank until you name one.
-Unlike `--group-by` it applies to every target shape, including a single run.
+It names an eager stream (a value the worker `emit`s), and the column shows its last element on the
+run's lineage, with the commit count at which it was committed (`loss=0.0123@1450`). Unlike
+`--group-by` it applies to every target shape, including a single run.
+
+## Log formats
+
+The cockpit reads **runstate log format 0.4.0**: a sqlite run log lives at
+`<root>/v0.4.0/<run_id>.db`, and a target path may name that file, an older format's copy, or the
+legacy `<root>/<run_id>.db` — each is the run `(root, run_id)`, and a migrated run's several files
+are one row. A run whose log is still in an older format is not read: it is a loud row naming the
+action (`format 0.3.0: migrate it (runstate migrate)`, or `unversioned` for a log from before
+versioned formats), with runstate's exact command in the drill-down. Migrating is the log owner's
+step, with runstate 0.4.0 (`runstate migrate <root>`), in the order runstate's
+`docs/specs/log-formats.md` §8 gives: stop the writers, bump their pin, then migrate.
 
 ## Keys
 
@@ -83,6 +96,9 @@ Unlike `--group-by` it applies to every target shape, including a single run.
 
 ## Depends on
 
-[runstate](https://github.com/GeoffChurch/runstate) — the public observables it folds:
-`peek_terminal`, `progress`, `last_activity`, `live_episode`, `latest_episode`, `live_demand`,
-`undischarged_stops`, `value_series`, plus `attach_channel` / `create_channel` and `Watcher`.
+[runstate](https://github.com/GeoffChurch/runstate), log format 0.4.0 — its public API only: the
+verdict `peek_terminal` (a `RunResult`'s `outcomes`, `tier`, `reports`, `error` and `malformed`),
+`last_activity` and `latest_episode`; the held folds `HeadFold`, `PrefixLen(Commits())`,
+`LastElement`, `LiveDemand` and `PendingStops`, which keep a polled row at O(new records);
+`await_consumed` for the stop handshake; and `attach_channel`, which refuses a log in another format
+with `LogFormatMismatch` / `LogFormatMissing`.

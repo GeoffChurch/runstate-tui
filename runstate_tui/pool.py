@@ -1,44 +1,48 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import replace
-from pathlib import Path
+from dataclasses import dataclass, replace
 
-from runstate import RunNotFound, attach_channel
-from runstate.channel import Channel
+from runstate import Channel, LogFormatError, RunNotFound, attach_channel
 
 from .env import Env
-from .resolver import Attrs, RunRef
-from .table import _OPEN_ERRORS, _bare, _fold_error, fold_open_channel
-from .types import Row, Status, StatusKind
+from .fold import RunFolds
+from .resolver import Attrs, RunRef, sqlite_log_path
+from .table import _OPEN_ERRORS, EVICT_KINDS, _bare, _fold_error, fold_open_channel, open_row_for
+from .types import Row, Status
 
 Table = tuple[tuple[RunRef, Attrs, Row], ...]
 
-# integrity verdicts that mean the pooled handle is no good — evict + close so the
-# next tick cold-opens fresh (self-healing detection; the pool holds only healthy handles).
-_EVICT_KINDS = (StatusKind.CORRUPT, StatusKind.UNREADABLE)
+
+@dataclass(frozen=True)
+class _Pooled:
+    """An open channel and the folds held beside it: evicted together, so a re-opened
+    run is folded from scratch, never resumed from another handle's partial state."""
+
+    channel: Channel
+    folds: RunFolds
 
 
 class ChannelPool:
-    """Owner-thread-ONLY LRU pool of open channels, keyed by the full RunRef.
-    reader == evictor: a mid-fold channel is never closed under it. NOT thread-safe
-    by design — one owner thread touches it (opens, reads, evicts, closes)."""
+    """Owner-thread-ONLY LRU pool of open channels and their held folds, keyed by the
+    full RunRef. reader == evictor: a mid-fold channel is never closed under it. NOT
+    thread-safe by design — one owner thread touches it (opens, reads, evicts, closes)."""
 
     def __init__(self, cap: int = 128) -> None:
         self._cap = cap
-        self._open: OrderedDict[RunRef, Channel] = OrderedDict()
+        self._open: OrderedDict[RunRef, _Pooled] = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._open)
 
     def _evict(self, ref: RunRef) -> None:
-        ch = self._open.pop(ref, None)
-        if ch is not None:
-            ch.close()
+        pooled = self._open.pop(ref, None)
+        if pooled is not None:
+            pooled.channel.close()
 
     def _evict_oldest(self) -> None:
-        _ref, ch = self._open.popitem(last=False)
-        ch.close()
+        _ref, pooled = self._open.popitem(last=False)
+        pooled.channel.close()
 
     def reconcile(self, live: set[RunRef]) -> None:
         """Close + drop any pooled run no longer resolved this frame."""
@@ -47,32 +51,31 @@ class ChannelPool:
 
     def row_for(self, ref: RunRef, frame_env: Env) -> Row:
         run_id, root, backend = ref
-        ch = self._open.get(ref)
-        if ch is None:
+        pooled = self._open.get(ref)
+        if pooled is None:
             # cold open via attach_channel: never fabricate a phantom db nor mutate a
             # foreign one. A run with no records (missing/empty/foreign valid db) raises
-            # `RunNotFound` -> honest `missing`; corrupt/non-sqlite raises `_OPEN_ERRORS`
-            # -> `unreadable` (not cached, retried next tick). attach_channel makes the
-            # old cold-path stat redundant AND safer (it catches the foreign-db case).
+            # `RunNotFound` -> honest `missing`; a log in another format a `LogFormatError`
+            # -> the loud format row; corrupt/non-sqlite `_OPEN_ERRORS` -> `unreadable`.
+            # None is cached, so each is retried next tick (a run migrated meanwhile opens).
             try:
                 ch = attach_channel(run_id, root=root, backend=backend)
-            except RunNotFound:
-                return _bare(Status.missing())
-            except _OPEN_ERRORS:
-                return _bare(Status.unreadable())
+            except (RunNotFound, LogFormatError, *_OPEN_ERRORS) as exc:
+                return open_row_for(exc)
             if len(self._open) >= self._cap:
                 self._evict_oldest()
-            self._open[ref] = ch
+            pooled = _Pooled(ch, RunFolds.start(objective=frame_env.objective))
+            self._open[ref] = pooled
         elif backend == "sqlite":
             # A CACHED sqlite handle keeps reading off its still-open inode even after the
             # .db is unlinked out from under a live cockpit (WAL: the fd persists), so the
             # fold would silently serve a phantom read that never self-heals. attach_channel
             # cannot re-check an already-open handle — a per-tick stat is the ONLY detector
-            # for the vanished-cached-file case. Missing -> evict + honest `missing`; an
-            # unreadable dir -> evict + `unreadable`. (Cold opens above skip this: attach
-            # already covers them.)
+            # for the vanished-cached-file case (a finding: no public "does this handle's
+            # log still exist"). Missing -> evict + honest `missing`; an unreadable dir ->
+            # evict + `unreadable`. (Cold opens above skip this: attach covers them.)
             try:
-                (Path(root) / f"{run_id}.db").stat()
+                sqlite_log_path(ref).stat()
             except FileNotFoundError:
                 self._evict(ref)
                 return _bare(Status.missing())
@@ -80,14 +83,14 @@ class ChannelPool:
                 self._evict(ref)
                 return _bare(Status.unreadable())
         self._open.move_to_end(ref)  # LRU: most-recently-used last
-        row = fold_open_channel(ch, frame_env)
-        if row.status.kind in _EVICT_KINDS:
-            self._evict(ref)
+        row = fold_open_channel(pooled.channel, frame_env, pooled.folds)
+        if row.status.kind in EVICT_KINDS:
+            self._evict(ref)  # the handle and its folds go together
         return row
 
     def close_all(self) -> None:
-        for ch in self._open.values():
-            ch.close()
+        for pooled in self._open.values():
+            pooled.channel.close()
         self._open.clear()
 
 

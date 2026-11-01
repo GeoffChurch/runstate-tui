@@ -6,13 +6,12 @@ so the interfaces get pinned here before anything else builds on them."""
 import asyncio
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 
 def test_build_log_accepts_request_id(build_log):
-    from runstate.observables import undischarged_stops
+    from runstate import undischarged_stops
 
     ch = build_log([({}, "control.stop", None, "webui:s1")])
     stops = undischarged_stops(ch)
@@ -20,10 +19,31 @@ def test_build_log_accepts_request_id(build_log):
 
 
 def test_build_log_still_accepts_three_tuples(build_log):
-    from runstate.observables import progress
+    from runstate import Commits, LatestClaimHead, prefix_len
 
-    ch = build_log([({"step": 1, "consumed_seq": 0, "t": 1.0}, "lifecycle.heartbeat", None)])
-    assert progress(ch) == 1
+    ch = build_log(
+        [
+            (
+                {"handle": "h", "t": 1.0, "resume_from": None, "sources": []},
+                "lifecycle.started",
+                None,
+            ),
+            (
+                {
+                    "claim_seq": 1,
+                    "consumed_seq": 0,
+                    "parent": None,
+                    "values": [],
+                    "fired": [],
+                    "expired": [],
+                    "t": 1.0,
+                },
+                "lifecycle.commit",
+                None,
+            ),
+        ]
+    )
+    assert prefix_len(ch, Commits(), head=LatestClaimHead()) == 1
 
 
 def test_counting_env_counts_calls(counting_env):
@@ -47,7 +67,7 @@ def test_fake_clock_yields_then_noop_sleep():
 
 
 def test_answer_on_sleep_fires_on_the_kth_call(build_log, answer_on_sleep):
-    ch = build_log([({"step": 0, "consumed_seq": 0, "t": 1.0}, "lifecycle.heartbeat", None)])
+    ch = build_log([({"claim_seq": 1, "consumed_seq": 0, "t": 1.0}, "lifecycle.heartbeat", None)])
     fired = []
     sleep = answer_on_sleep(ch, {2: lambda channel: fired.append(channel)})
     sleep(0.05)  # 1st call: no seed registered
@@ -91,7 +111,7 @@ def test_corrupt_seq_plants_torn_and_alien(tmp_path, build_log):
     from tests.helpers import corrupt_seq
 
     w = create_channel("r", root=tmp_path, backend="sqlite")
-    w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    w.send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, topic="lifecycle.started")
     w.close()
     corrupt_seq(tmp_path, "r", 1, literal="42")
     r = create_channel("r", root=tmp_path, backend="sqlite")
@@ -106,7 +126,7 @@ def test_corrupt_seq_plants_byte_torn_body(tmp_path):
     from tests.helpers import corrupt_seq
 
     w = create_channel("torn", root=tmp_path, backend="sqlite")
-    w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    w.send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, topic="lifecycle.started")
     w.close()
     corrupt_seq(tmp_path, "torn", 1)  # default literal="{not json"
     r = create_channel("torn", root=tmp_path, backend="sqlite")
@@ -116,9 +136,11 @@ def test_corrupt_seq_plants_byte_torn_body(tmp_path):
 
 
 def test_foreign_db_is_valid_sqlite_with_alien_schema(foreign_db):
+    from tests.helpers import log_path
+
     ref = foreign_db  # (run_id, root, backend)
-    assert (Path(ref[1]) / f"{ref[0]}.db").exists()
-    conn = sqlite3.connect(str(Path(ref[1]) / f"{ref[0]}.db"))
+    assert log_path(ref[1], ref[0]).exists()  # at the current format's address
+    conn = sqlite3.connect(str(log_path(ref[1], ref[0])))
     try:
         rows = conn.execute("SELECT id, note FROM unrelated").fetchall()
         assert rows  # a real row is present -> a VALID db, just alien schema
@@ -132,7 +154,7 @@ def test_held_writer_sqlite_run_stays_open_and_appends_live(held_writer_sqlite_r
     from runstate import create_channel
 
     ref, send = held_writer_sqlite_run
-    send({"handle": "h", "t": 1.0}, "lifecycle.started")
+    send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, "lifecycle.started")
     run_id, root, backend = ref
     reader = create_channel(run_id, root=root, backend=backend)
     try:
@@ -161,7 +183,10 @@ async def _advance_tick_and_table(tmp_path):
     from tests.helpers import advance_tick
 
     ch = create_channel("adv", root=tmp_path, backend="sqlite")
-    ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
+    ch.send(
+        {"handle": "local://h/1", "t": 100.0, "resume_from": None, "sources": []},
+        topic="lifecycle.started",
+    )
     ch.close()
     ref = ("adv", str(tmp_path), "sqlite")
 
@@ -184,3 +209,19 @@ async def _advance_tick_and_table(tmp_path):
         t = screen.query_one("#detail-log", DataTable)
         assert t.row_count == 1
         assert "local://h/1" in t.get_cell_at(Coordinate(0, 3))  # body column
+
+
+def test_log_path_and_move_log_address_a_format(tmp_path):
+    from runstate import LOG_FORMAT, LogFormatMismatch, attach_channel, create_channel
+
+    from tests.helpers import log_path, move_log
+
+    assert log_path(tmp_path, "r") == tmp_path / f"v{LOG_FORMAT}" / "r.db"
+    w = create_channel("r", root=tmp_path, backend="sqlite")
+    w.send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, topic="lifecycle.started")
+    w.close()
+    assert log_path(tmp_path, "r").exists()  # create_channel births at that address
+    moved = move_log(tmp_path, "r", to=log_path(tmp_path, "r", version="0.3.0"))
+    assert moved.exists() and not log_path(tmp_path, "r").exists()
+    with pytest.raises(LogFormatMismatch):
+        attach_channel("r", root=tmp_path)  # the address is the format

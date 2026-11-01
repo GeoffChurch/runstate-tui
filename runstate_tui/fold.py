@@ -4,26 +4,72 @@ import json
 import math
 import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TypeVar
 
-from runstate.channel import Channel
-from runstate.observables import (
+from runstate import (
+    Channel,
+    Commits,
+    Envelope,
+    Head,
+    HeadFold,
+    LastElement,
+    LiveDemand,
     MalformedRecordError,
+    PendingStops,
+    PrefixLen,
+    RunResult,
+    Tier,
+    Topic,
     last_activity,
     latest_episode,
-    live_demand,
     peek_terminal,
-    progress,
-    undischarged_stops,
 )
-from runstate.vocabulary.payloads import Topic
 
 from .env import Env, Liveness, resolve_liveness
-from .types import Issue, IssueKind, Row, Severity, Status
+from .types import Issue, IssueKind, Reading, Row, Severity, Status
 
 T = TypeVar("T")
 
 _TORN_DECODE_ERRORS = (json.JSONDecodeError, sqlite3.DatabaseError)
+
+
+@dataclass(frozen=True)
+class Objective:
+    """The value column's stream and its held `LastElement` fold."""
+
+    name: str
+    last: LastElement
+
+
+@dataclass(frozen=True)
+class RunFolds:
+    """One run's held folds (runstate's `HeadFold`, `PrefixLen`, `LastElement`,
+    `LiveDemand`, `PendingStops`): each poll reads only the records since the last, so a
+    polled row costs O(new records), never O(log) -- "poll a cheap watermark, apply the
+    delta, never rebuild". It is state that outlives a tick, so it lives with whoever holds
+    the run across ticks: the pool beside its channel, a screen beside its ref. A fresh one
+    gives the pure reads' answers at a cold O(log) cost, which a one-shot caller pays.
+
+    A fold's cursor is a seq, not a handle, so a holder that re-opens the run each tick
+    keeps its folds. A holder drops them with the channel when the run reads corrupt or
+    unreadable (the pool's eviction), so a healed run is folded from scratch."""
+
+    head: HeadFold
+    commits: PrefixLen
+    objective: Objective | None  # None: no objective named, no value column
+    demand: LiveDemand
+    stops: PendingStops
+
+    @classmethod
+    def start(cls, *, objective: str | None) -> RunFolds:
+        return cls(
+            head=HeadFold(),
+            commits=PrefixLen(Commits()),
+            objective=None if objective is None else Objective(objective, LastElement(objective)),
+            demand=LiveDemand(),
+            stops=PendingStops(),
+        )
 
 
 def locate_torn_seq(channel: Channel) -> int | None:
@@ -48,11 +94,15 @@ def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Iss
     the run's other factors survive: runstate's MalformedRecordError (schema-invalid), or
     an AttributeError/TypeError from a non-dict body (`42`, `[1,2,3]`). The exact exception
     is retained in `detail`. A byte-torn body (json.JSONDecodeError) is NOT caught here — it
-    propagates to open_and_fold as whole-run `corrupt` (undecodable substrate)."""
+    propagates to open_and_fold as whole-run `corrupt` (undecodable substrate).
+
+    A held fold that raises keeps raising on every poll (runstate: "a check that fails
+    holds for the claim, and every poll raises it, until a newer claim"), so the issue is
+    stable across ticks rather than flickering."""
     try:
         return fn(channel), None
     except (MalformedRecordError, AttributeError, TypeError) as exc:
-        seq = getattr(exc, "seq", None)
+        seq = exc.seq if isinstance(exc, MalformedRecordError) else None
         loc = f" at seq {seq}" if seq is not None else ""
         return None, Issue(
             kind=IssueKind.MALFORMED,
@@ -61,6 +111,35 @@ def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Iss
             seq=seq,
             detail=f"{type(exc).__name__}: {exc}",
         )
+
+
+def _verdict_detail(result: RunResult) -> str | None:
+    """The operator-facing diagnostic a verdict carries, by the viewpoint it rests on:
+    the exit's own error (None for a clean exit); every death report's evidence, which no
+    fold parses (`reap: signal 9`, `slurm:TIMEOUT`), in seq order; and for an unclaimed
+    run, that the verdict is its launch's -- a fact about a process, never the worker's
+    word (an `sbatch` wrapper exits 0 at submit time)."""
+    if result.tier is Tier.DIED:
+        return "; ".join(r.evidence for r in result.reports) or None
+    if result.tier is Tier.TERMINATED:
+        return "unclaimed launch"
+    return result.error
+
+
+def _skipped_issue(result: RunResult) -> Issue | None:
+    """The unreadable records the verdict skipped (`RunResult.malformed`): runstate reports
+    them rather than raising, so the cockpit surfaces them as one MEDIUM issue -- the
+    verdict stands, a signal is flagged."""
+    if not result.malformed:
+        return None
+    seqs = ", ".join(str(s) for s in result.malformed)
+    return Issue(
+        kind=IssueKind.MALFORMED,
+        severity=Severity.MEDIUM,
+        message=f"verdict skipped unreadable record at seq {seqs}",
+        seq=result.malformed[0],
+        detail=f"RunResult.malformed={result.malformed!r}",
+    )
 
 
 def reconcile_status(
@@ -95,23 +174,21 @@ def reconcile_status(
         )
 
     if result is not None:
-        # terminal wins; result.error is the operator-facing diagnostic (None
-        # for a clean stop) -- retained on Status, not just the closed outcome
-        return Status.terminal(result.outcome, detail=result.error), freshness, issues
+        # terminal wins: the claim's exit, else the death reports naming it, else an
+        # unclaimed run's launch. The verdict is a set of outcomes; none is chosen.
+        skipped = _skipped_issue(result)
+        if skipped is not None:
+            issues.append(skipped)
+        status = Status.terminal(result.outcomes, result.tier, detail=_verdict_detail(result))
+        return status, freshness, issues
     if la is None:
         return Status.pending(), freshness, issues  # no dated activity at all
+    # A held claim. No read probes a process, so a crash nobody reported reads held until
+    # a party with evidence writes a death report; freshness ages it to `stale` past
+    # `stuck_threshold`, which is inference (slow, or dead), never a verdict.
     verdict = resolve_liveness(channel, env, now, la)
     status = Status.live() if verdict is Liveness.LIVE else Status.stale()
     return status, freshness, issues
-
-
-def read_value(channel: Channel, objective: str | None) -> tuple[str, object, int | None] | None:
-    if objective is None:
-        return None
-    e = channel.latest(Topic.VALUE, name=objective)
-    if e is None:
-        return None
-    return (objective, e.body.get("value"), e.body.get("step"))
 
 
 def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
@@ -137,48 +214,78 @@ def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | No
     return now - float(t), None
 
 
-def status_fold(channel: Channel, env: Env) -> Row:
+def read_lineage(
+    channel: Channel, folds: RunFolds
+) -> tuple[int | None, Reading | None, list[Issue]]:
+    """The frontier and the objective's reading, both at ONE head resolved this poll, so
+    they agree. The frontier is `count(Commits(), head)` (0 on the empty lineage); the
+    reading is the objective's last element in lineage order, with the commit count at
+    the node that committed it. A head that raises (a malformed node on the newest claim)
+    degrades both to None; a value that raises (a malformed body) degrades the reading
+    alone, so the frontier survives it -- one MALFORMED issue per failed read."""
+    issues: list[Issue] = []
+
+    def _frontier(ch: Channel) -> tuple[Head, int]:
+        head = folds.head.poll(ch)
+        return head, folds.commits.poll(ch, head)
+
+    got, head_issue = guarded(_frontier, channel)
+    if head_issue is not None:
+        issues.append(head_issue)
+    if got is None:
+        return None, None, issues
+    head, frontier = got
+    objective = folds.objective
+    if objective is None:
+        return frontier, None, issues
+
+    def _reading(ch: Channel) -> Reading | None:
+        element = objective.last.poll(ch, head)
+        if element is None:
+            return None
+        at = folds.commits.at(ch, element.node, w=head.w)
+        return Reading(name=objective.name, value=element.value, commits=at)
+
+    reading, value_issue = guarded(_reading, channel)
+    if value_issue is not None:
+        issues.append(value_issue)
+    return frontier, reading, issues
+
+
+def status_fold(channel: Channel, env: Env, folds: RunFolds) -> Row:
     now = env.clock()  # captured once per frame, threaded below
     issues: list[Issue] = []
 
     status, freshness, status_issues = reconcile_status(channel, env, now)
     issues.extend(status_issues)
 
-    frontier, frontier_issue = guarded(progress, channel)
-    if frontier_issue is not None:
-        issues.append(frontier_issue)
-
-    value, value_issue = guarded(lambda ch: read_value(ch, env.objective), channel)
-    if value_issue is not None:
-        issues.append(value_issue)
+    frontier, value, lineage_issues = read_lineage(channel, folds)
+    issues.extend(lineage_issues)
 
     elapsed, elapsed_issue = read_elapsed(channel, now)
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
-    def _episode(ch: Channel) -> tuple[int, str | None] | None:
-        env = latest_episode(ch)
-        if env is None:
+    def _episode(ch: Channel) -> str | None:
+        e: Envelope | None = latest_episode(ch)
+        if e is None:
             return None
         # .body.get can hit an alien non-dict body -> AttributeError -> caught by guarded() below
-        return (env.seq, env.body.get("handle"))
+        handle = e.body.get("handle")
+        return handle if isinstance(handle, str) else None
 
-    episode_info, episode_issue = guarded(_episode, channel)
+    episode, episode_issue = guarded(_episode, channel)
     if episode_issue is not None:
         issues.append(episode_issue)
-    episode_seq = episode_info[0] if episode_info is not None else None
-    episode = episode_info[1] if episode_info is not None else None
 
-    stops, stops_issue = guarded(undischarged_stops, channel)
+    # Pending stops by name, for the whole log (runstate's PendingStops): a stop is a
+    # request about the process, so one a crashed claim never honored is still pending,
+    # and the next claim's first drain honors it -- live, not a ghost of a prior episode.
+    stops, stops_issue = guarded(folds.stops.poll, channel)
     if stops_issue is not None:
         issues.append(stops_issue)
-    if stops is not None and episode_seq is not None:
-        # episode-scope: a stop filed against a PRIOR episode, never discharged,
-        # is a stale ghost on a fresh relaunch -- drop anything at/before the
-        # current episode's started seq.
-        stops = [s for s in stops if s.seq > episode_seq]
 
-    demand, demand_issue = guarded(live_demand, channel)
+    demand, demand_issue = guarded(folds.demand.poll, channel)
     if demand_issue is not None:
         issues.append(demand_issue)
 

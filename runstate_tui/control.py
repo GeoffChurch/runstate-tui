@@ -6,13 +6,22 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from runstate import RunNotFound, RunResult, attach_channel, await_consumed
-from runstate.channel import Channel
-from runstate.observables import MalformedRecordError, peek_terminal
-from runstate.vocabulary.payloads import Nak, Topic
+from runstate import (
+    Channel,
+    LogFormatError,
+    MalformedRecordError,
+    Nak,
+    RunNotFound,
+    RunResult,
+    Topic,
+    attach_channel,
+    await_consumed,
+    peek_terminal,
+)
 
 from .resolver import RunRef
-from .types import Severity
+from .table import describe_format_error
+from .types import Severity, Status
 
 # the same open-error taxonomy the fold uses (table.py); sqlite3 for its exceptions only
 _OPEN_ERRORS = (sqlite3.DatabaseError, sqlite3.OperationalError, PermissionError, OSError)
@@ -66,18 +75,24 @@ def _already_ended(channel: Channel) -> str | None:
     """Peek (never send) for an existing terminal, so a stop against a run that
     already ended can be recognized as MOOT before it ever touches the log.
 
-    Returns the terminal outcome's value (str) if the run has already ended,
-    else None. A `MalformedRecordError` (a decodable-but-wrong-shape terminal
-    record) can't confirm the run ended — degrade to None and let the caller
-    proceed to send (consistent with `fold.py`'s `guarded` degradation). A
-    byte-torn body (`json.JSONDecodeError`) is NOT caught here — it propagates,
-    consistent with the corrupt taxonomy elsewhere (an undecodable substrate is
-    not this function's call to make)."""
+    Returns the terminal verdict's label if the run has already ended, else
+    None. A `MalformedRecordError` (a terminal record runstate refuses to read,
+    e.g. an unclaimed run's unreadable `terminated`) can't confirm the run
+    ended — degrade to None and let the caller proceed to send (consistent
+    with `fold.py`'s `guarded` degradation). A byte-torn body
+    (`json.JSONDecodeError`) is NOT caught here — it propagates, consistent with
+    the corrupt taxonomy elsewhere (an undecodable substrate is not this
+    function's call to make)."""
     try:
         result = peek_terminal(channel)
     except MalformedRecordError:
         return None
-    return None if result is None else str(result.outcome)
+    return None if result is None else _verdict_label(result)
+
+
+def _verdict_label(result: RunResult) -> str:
+    """A verdict as the status column labels it: every outcome, none chosen."""
+    return Status.terminal(result.outcomes, result.tier, detail=None).label
 
 
 def stop_run(
@@ -91,9 +106,12 @@ def stop_run(
     """Send one unconditional `control.stop` and await its answer (bounded).
 
     An empty StopTrigger body (`{}`) is a `from`-less one-shot: the worker fires
-    it at the next safe point. `await_consumed`'s codomain is the whole answer
-    space — None (accepted) | Nak (refused) | RunResult (died under the
-    request) | TimeoutError (not drained in time).
+    it at the next safe point. `request_id` names the stop, and must be non-empty
+    and fresh (subscription-v0.4: a nameless stop is never pending). The answer is
+    `await_consumed`'s whole codomain, by watermarks and answers — None (a claim's
+    `consumed_seq` reached it, or its exit's `honored` names it) | Nak (refused) |
+    RunResult (the claim ended by its own exit without taking it, or the head is
+    closed) | TimeoutError (not drained in time).
 
     BEFORE sending, peek for an existing terminal: a stop against a run that
     already ended is MOOT, not UNSAFE — UNSAFE means "sent to a live run, not
@@ -106,9 +124,7 @@ def stop_run(
     if seq is None:  # provably-lost claim — only reachable with expected_seq; defensive
         return StopOutcome(StopResult.UNDELIVERED, request_id, "stop was not appended (lost claim)")
     try:
-        answer = await_consumed(
-            channel, seq, request_id=request_id, timeout=timeout, now=now, sleep=sleep
-        )
+        answer = await_consumed(channel, seq, timeout=timeout, now=now, sleep=sleep)
     except TimeoutError:
         return StopOutcome(
             StopResult.UNSAFE, request_id, f"not consumed within {timeout:g}s — no live worker?"
@@ -117,9 +133,9 @@ def stop_run(
         return StopOutcome(StopResult.ACCEPTED, request_id)
     if isinstance(answer, Nak):
         return StopOutcome(StopResult.REFUSED, request_id, answer.reason)
-    # RunResult — the run died under the request (refused-by-death)
+    # RunResult — the run ended under the request without taking it
     assert isinstance(answer, RunResult)
-    return StopOutcome(StopResult.DIED, request_id, str(answer.outcome.value))
+    return StopOutcome(StopResult.DIED, request_id, _verdict_label(answer))
 
 
 def dispatch_stop(
@@ -135,7 +151,8 @@ def dispatch_stop(
     attach_channel (never create_channel): controlling a run must NOT fabricate a
     phantom `<run_id>.db`, and must NOT schema-mutate a foreign valid sqlite db
     reached through a stale pointer (spec §8) — both, plus a genuinely-empty run,
-    are `RunNotFound` now, reported UNDELIVERED (missing) without any write. A
+    are `RunNotFound` now, reported UNDELIVERED (missing) without any write. A log
+    in another format raises a `LogFormatError` ⇒ UNDELIVERED, naming the action. A
     corrupt/non-sqlite db still raises `sqlite3.DatabaseError` (`_OPEN_ERRORS`) ⇒
     UNDELIVERED (unopenable). attach_channel is writable, so the stop still sends
     into a real run."""
@@ -144,6 +161,8 @@ def dispatch_stop(
         channel = attach_channel(run_id, root=root, backend=backend)
     except RunNotFound:
         return StopOutcome(StopResult.UNDELIVERED, request_id, "no such run (missing)")
+    except LogFormatError as exc:
+        return StopOutcome(StopResult.UNDELIVERED, request_id, describe_format_error(exc).message)
     except _OPEN_ERRORS:
         return StopOutcome(StopResult.UNDELIVERED, request_id, "run could not be opened")
     try:

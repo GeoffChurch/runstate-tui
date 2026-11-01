@@ -3,12 +3,26 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rich.text import Text
-from runstate.channel import Envelope
-from runstate.observables import Outcome
+from runstate import Envelope, Outcome, Tier
 
-from .types import _STATUS_TWIN_ISSUES, IssueKind, Row, Severity, Status, StatusKind
+from .types import (
+    _STATUS_TWIN_ISSUES,
+    IssueKind,
+    Row,
+    Severity,
+    Status,
+    StatusKind,
+    ordered_outcomes,
+)
 
-_TOPIC_COLORS = {"lifecycle": "#539bf5", "control": "#d29922", "value": "#3fb950"}
+# `supervisor` is the external-report plane (launched / terminated / the death report
+# `died`): a distinct hue, so a death report stands out in the raw log.
+_TOPIC_COLORS = {
+    "lifecycle": "#539bf5",
+    "control": "#d29922",
+    "value": "#3fb950",
+    "supervisor": "#a371f7",
+}
 _STATUS_COLORS = {
     StatusKind.LIVE: "#3fb950",
     StatusKind.STALE: "#d29922",
@@ -18,24 +32,35 @@ _STATUS_COLORS = {
     StatusKind.UNREADABLE: "#f85149",
     StatusKind.ERROR: "#f85149",
     StatusKind.CONFLICTED: "#d29922",
+    StatusKind.LOG_FORMAT: "#f85149",
 }
 _OUTCOME_COLORS = {
     Outcome.COMPLETED: "#539bf5",
     Outcome.PREEMPTED: "#d29922",
     Outcome.ERRORED: "#f85149",
     Outcome.KILLED: "#f85149",
+    Outcome.LOST: "#f85149",
     Outcome.PRESUMED_DEAD: "#f85149",
+}
+# how the drill-down card names the viewpoint a verdict rests on (runstate's Tier)
+_TIER_LABELS = {
+    Tier.EXIT: "the worker's exit",
+    Tier.DIED: "death report",
+    Tier.TERMINATED: "unclaimed launch",
 }
 
 
 def status_color(status: Status) -> str:
     """A truecolor HEX for a status — the traffic-light dot. Redundant with the
     text label (never the sole signal). Keyed on StatusKind, refined by terminal
-    Outcome. HEX (not Rich/ANSI color names) so the palette renders faithfully
-    instead of being bent by a terminal's ANSI theme (e.g. `blue` -> purple,
-    `yellow` -> amber on some themes)."""
-    if status.kind is StatusKind.TERMINAL and status.outcome is not None:
-        return _OUTCOME_COLORS.get(status.outcome, "#8b949e")
+    Outcome -- the worst known one, when death reports name several. HEX (not
+    Rich/ANSI color names) so the palette renders faithfully instead of being bent by
+    a terminal's ANSI theme (e.g. `blue` -> purple, `yellow` -> amber on some themes)."""
+    if status.kind is StatusKind.TERMINAL:
+        known = [
+            _OUTCOME_COLORS[o] for o in ordered_outcomes(status.outcomes) if o in _OUTCOME_COLORS
+        ]
+        return known[-1] if known else "#8b949e"
     return _STATUS_COLORS.get(status.kind, "#8b949e")
 
 
@@ -52,12 +77,11 @@ def format_row(row: Row) -> str:
         label += f": {row.status.detail}"  # e.g. "errored: OOM" -- retains RunResult.error
     parts: list[str] = [label]
     if row.frontier is not None:
-        parts.append(f"step {row.frontier}")
+        parts.append(f"{row.frontier} commit" + ("" if row.frontier == 1 else "s"))
     if row.freshness is not None:
         parts.append(f"{row.freshness:.0f}s ago")
     if row.value is not None:
-        name, value, step = row.value
-        parts.append(f"{name}={value}" + (f" @ {step}" if step is not None else ""))
+        parts.append(f"{row.value.name}={row.value.value} @ {row.value.commits}")
     if row.elapsed is not None:
         parts.append(f"ran {row.elapsed:.0f}s")
     if row.undischarged_stops:
@@ -78,6 +102,8 @@ def format_summary_card(row: Row) -> Text:
     # see test_summary_card_colors_only_the_dot_not_the_whole_line).
     line1.append(format_row(row))  # the existing one-line summary
     parts = [f"episode {row.episode}" if row.episode else "episode —"]
+    if row.status.tier is not None:
+        parts.append(f"verdict by {_TIER_LABELS.get(row.status.tier, str(row.status.tier.value))}")
     if row.undischarged_stops:
         parts.append(f"■ {len(row.undischarged_stops)} stop pending")
     if row.live_demand:

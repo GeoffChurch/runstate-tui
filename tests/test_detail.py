@@ -12,23 +12,26 @@ from runstate_tui import detail as detail_module
 from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
 from runstate_tui.format import topic_color
+from runstate_tui.table import HeldRun
 from tests.helpers import advance_tick
+from tests.records import Script, write
 
 
 def _seed_rich(tmp_path):
-    """A rich run -- started(seq 1) + heartbeat(seq 2) + value(seq 3) + subscribe(seq 4)
-    + stop(seq 5) -- à la conftest.py's `rich_run` fixture / showcase.py's
-    `scene_drilldown` seed, but SQLITE-backed (not memory): DrillDownScreen and
-    read_log_delta take a RunRef and read from disk, not an already-open channel."""
+    """A rich run in log format 0.4.0 -- started(seq 1) + value(seq 2) + the commit that
+    commits it(seq 3) + a pure-demand subscribe(seq 4) + stop(seq 5) -- à la conftest.py's
+    `rich_run` fixture / showcase.py's `scene_drilldown` seed, but SQLITE-backed (not
+    memory): DrillDownScreen and read_log_delta take a RunRef and read from disk, not an
+    already-open channel."""
     run_id = "rich"
     writer = create_channel(run_id, root=tmp_path, backend="sqlite")
-    writer.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
-    writer.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
-    writer.send({"value": 0.03, "step": 7, "t": 140.0}, topic="value", name="loss")
-    writer.send(
-        {"schedule": {}, "names": ["loss"]}, topic="control.subscribe", request_id="webui:sub1"
-    )
-    writer.send({}, topic="control.stop", request_id="webui:stop1")
+    s = Script()
+    s.started(100.0)
+    s.value("loss", 0.03, 140.0)
+    s.commit(140.0)
+    s.subscribe("webui:sub1", None, {"until": {"commits": 100}})
+    s.stop("webui:stop1")
+    write(writer, s.records)
     writer.close()
     return (run_id, str(tmp_path), "sqlite")
 
@@ -87,13 +90,16 @@ async def _renders(tmp_path):
         assert [tx.plain for tx in topics] == [
             "control.stop",
             "control.subscribe",
+            "lifecycle.commit",
             "value",
-            "lifecycle.heartbeat",
             "lifecycle.started",
         ]
         assert topics[0].style == topic_color("control.stop")
-        assert topics[2].style == topic_color("value")
+        assert topics[2].style == topic_color("lifecycle.commit")
+        assert topics[3].style == topic_color("value")
         assert topics[4].style == topic_color("lifecycle.started")
+        # a value-v0.3 body carries no step: the cell is just name=value
+        assert t.get_cell_at(Coordinate(3, 3)) == "loss=0.03"
 
 
 def test_render_window_preserves_the_selected_seq_across_a_repaint(tmp_path):
@@ -113,7 +119,7 @@ async def _preserves_selection(tmp_path):
             if t.row_count == 5:
                 break
 
-        # select seq 3 (topic "value", at index 2 in the newest-first [5,4,3,2,1] order)
+        # select seq 3 (the commit, at index 2 in the newest-first [5,4,3,2,1] order)
         t.move_cursor(row=2)
         assert t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value == "3"
 
@@ -133,14 +139,15 @@ def test_unknown_family_topics_always_shown_in_render_window(tmp_path):
 
 
 async def _unknown_family_always_shown(tmp_path):
-    # Finding #1: a topic outside the three known families (e.g. `launcher.terminated`,
-    # written onto the same run channel by runstate's Launcher) must NEVER be silently
+    # Finding #1: a topic outside the three known families (e.g. the death report
+    # `supervisor.died`, written onto the same run channel by a launcher's reap or any
+    # party with evidence) must NEVER be silently
     # dropped, no matter which known families are toggled off -- `_predicate` hides only
     # the toggled-off KNOWN families (`_FAMILIES - _enabled`), so an unknown family is
     # never in that hidden set. This goes through `DrillDownScreen._render_window` (not
     # `envelope_filter` directly) so it discriminates the restrict-to-vs-subtractive bug
     # in `_predicate` itself.
-    from runstate.channel import Envelope
+    from runstate import Envelope
 
     ref = _seed_rich(tmp_path)
     app = _HostApp(ref)
@@ -154,20 +161,21 @@ async def _unknown_family_always_shown(tmp_path):
             if t.row_count == 5:
                 break
 
-        launcher = Envelope(seq=6, topic="launcher.terminated", name=None, request_id=None, body={})
-        screen._window.append(launcher)
+        died = Envelope(seq=6, topic="supervisor.died", name=None, request_id=None, body={})
+        screen._window.append(died)
         screen._enabled = set()  # toggle OFF every known family
         screen._render_window()
 
         # every known-family row is hidden; the unknown-family row is the sole survivor
         assert t.row_count == 1
-        assert t.get_cell_at(Coordinate(0, 1)).plain == "launcher.terminated"
+        assert t.get_cell_at(Coordinate(0, 1)).plain == "supervisor.died"
+        assert t.get_cell_at(Coordinate(0, 1)).style == topic_color("supervisor.died")
 
 
 def test_pop_mid_tick_does_not_crash(tmp_path, monkeypatch):
     # Covers detail.py's teardown guard (_TEARDOWN_ERRORS / _marshal's try/except): a
     # pop mid-tick can race _refresh's off-thread _marshal calls onto a torn-down
-    # screen. Deterministic instead of a blind sleep: render_single is patched to
+    # screen. Deterministic instead of a blind sleep: HeldRun.row (the card's fold) is patched to
     # block on a threading.Event, so the pop is GUARANTEED to land while the tick is
     # still mid-flight, and _marshal's call_from_thread calls are GUARANTEED to run
     # only after the screen has been popped (confirmed empirically pre-redesign: this
@@ -191,14 +199,14 @@ async def _pop_mid_tick(tmp_path, monkeypatch):
     ref = _seed_rich(tmp_path)
     entered = threading.Event()
     release = threading.Event()
-    orig_render_single = detail_module.render_single
+    orig_row = HeldRun.row
 
-    def slow_render_single(ref, env):
+    def slow_row(self):
         entered.set()
         release.wait(2.0)
-        return orig_render_single(ref, env)
+        return orig_row(self)
 
-    monkeypatch.setattr(detail_module, "render_single", slow_render_single)
+    monkeypatch.setattr(HeldRun, "row", slow_row)
 
     app = _HostApp(ref, tick_interval=0.02)
     async with app.run_test() as pilot:  # on_mount fires the first (only) tick
@@ -206,8 +214,8 @@ async def _pop_mid_tick(tmp_path, monkeypatch):
             await pilot.pause(0.01)
             if entered.is_set():
                 break
-        assert entered.is_set(), "the tick never entered render_single -- can't test the race"
-        await pilot.app.pop_screen()  # pop WHILE render_single is still blocked mid-tick
+        assert entered.is_set(), "the tick never entered the card fold -- can't test the race"
+        await pilot.app.pop_screen()  # pop WHILE the card fold is still blocked mid-tick
         release.set()  # let the in-flight tick proceed -> its _marshal calls now race the pop
         await pilot.pause(0.3)  # give the worker thread time to finish and marshal (or not crash)
 
@@ -223,7 +231,9 @@ def test_live_tail_appends_at_top_incrementally(tmp_path):
 async def _live_tail(tmp_path):
     ref = ("live", str(tmp_path), "sqlite")
     w = create_channel("live", root=tmp_path, backend="sqlite")
-    w.send({"handle": "h", "t": 1.0}, topic="lifecycle.started")
+    live = Script()
+    live.started(1.0, "h")
+    write(w, live.records)
     app = _HostApp(ref, tick_interval=999.0)
     async with app.run_test(size=(90, 22)) as pilot:
         screen = app.screen
@@ -235,7 +245,8 @@ async def _live_tail(tmp_path):
         assert t.row_count == 1
         assert screen._cursor == 1
 
-        w.send({"step": 5, "consumed_seq": 0, "t": 2.0}, topic="lifecycle.heartbeat")
+        live.commit(2.0)
+        write(w, live.records[1:])
         await advance_tick(pilot, screen)
         assert t.get_cell_at(Coordinate(0, 0)) == "2"  # newest (seq 2) now on TOP
         assert t.row_count == 2

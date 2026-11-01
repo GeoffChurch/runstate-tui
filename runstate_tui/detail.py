@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rich.text import Text
-from runstate.channel import Envelope
+from runstate import Envelope
 from textual import events, work
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -18,7 +18,7 @@ from textual.widgets import DataTable, Input, Static
 from .env import Env
 from .format import format_envelope, format_summary_card, topic_color
 from .resolver import RunRef
-from .table import envelope_filter, read_log_delta, render_single
+from .table import HeldRun, envelope_filter, read_log_delta
 
 # a pop mid-tick can race the marshal below onto a torn-down screen three ways:
 # the event loop already closed (RuntimeError), the callback was cancelled
@@ -31,21 +31,21 @@ _LOG_COLS = ("seq", "topic", "request", "body")
 
 
 def _body_text(e: Envelope) -> str:
-    """The log table's body cell: a `value` envelope prettifies to `name=value @ step`
-    (mirroring format_row's own value display) -- everything else renders as the raw
-    body (faithful default, matching format_envelope's convention; the table never
-    invents a shape a topic doesn't have)."""
+    """The log table's body cell: a `value` envelope prettifies to `name=value` --
+    everything else renders as the raw body (faithful default, matching
+    format_envelope's convention; the table never invents a shape a topic doesn't
+    have). A value-v0.3 record carries no position: the node that commits it does, so
+    the raw log has none to show (the card's reading has the commit count)."""
     if e.topic == "value" and isinstance(e.body, dict):
         name = e.name or "value"
-        step = e.body.get("step")
-        return f"{name}={e.body.get('value')}" + (f" @ {step}" if step is not None else "")
+        return f"{name}={e.body.get('value')}"
     return str(e.body)
 
 
 class DrillDownScreen(Screen[None]):
-    """The drill-down detail view: a compact summary CARD (a pure re-fold each tick,
-    `format_summary_card`) over a colored/zebra/newest-at-top log DataTable painted
-    from a bounded in-memory window (`log_view = window ∘ filter ∘ read`, spec
+    """The drill-down detail view: a compact summary CARD (re-folded each tick over
+    folds held across ticks, `format_summary_card`) over a colored/zebra/newest-at-top
+    log DataTable painted from a bounded in-memory window (`log_view = window ∘ filter ∘ read`, spec
     2026-07-19-drilldown-redesign-design.md). `escape` returns.
 
     `_refresh` is an incremental delta-cursor live-tail worker that self-reschedules:
@@ -82,6 +82,7 @@ class DrillDownScreen(Screen[None]):
         super().__init__()
         self._ref = ref
         self._env = env
+        self._held = HeldRun(ref, env)  # the card's folds, held across ticks (O(new) a tick)
         self._tick_interval = tick_interval
         self._cursor = 0
         self._window: deque[Envelope] = deque(maxlen=log_cap)  # last N envelopes, oldest..newest
@@ -92,7 +93,7 @@ class DrillDownScreen(Screen[None]):
         yield Static("", id="detail-card")
         with Vertical(id="detail-logbox"):
             yield Input(
-                placeholder="/ filter…   topic · request · step>N · text",
+                placeholder="/ filter…   topic · request · seq>N · text",
                 id="detail-filter-input",
             )
             yield DataTable(id="detail-log", zebra_stripes=True, cursor_type="row")
@@ -122,7 +123,7 @@ class DrillDownScreen(Screen[None]):
 
     def _predicate(self) -> Callable[[Envelope], bool]:
         # subtractive: hide only the toggled-off KNOWN families (_FAMILIES - _enabled);
-        # a topic in an unknown family (e.g. launcher.*) is never in that hidden set, so
+        # a topic in an unknown family (e.g. supervisor.*) is never in that hidden set, so
         # it always shows — the log streams every record (Finding #1).
         return envelope_filter(self._filter_text, set(_FAMILIES) - self._enabled)
 
@@ -239,9 +240,9 @@ class DrillDownScreen(Screen[None]):
         # below onto a torn-down screen, which _marshal already guards
         # (_TEARDOWN_ERRORS) -- including the final self-reschedule, so a popped screen
         # simply stops ticking rather than raising.
-        # card: the Row, re-folded off-thread each tick (pure) -- byte-torn surfaces as
-        # a loud `corrupt` card, not a crash.
-        row = render_single(self._ref, self._env)
+        # card: the Row, folded off-thread each tick over the held folds (only the records
+        # since the last tick) -- byte-torn surfaces as a loud `corrupt` card, not a crash.
+        row = self._held.row()
         self._marshal(self._show_card, format_summary_card(row))
         # log: incremental raw delta (unfiltered accumulation -> clean cursor); the
         # filter is applied in _render_window over the bounded window.

@@ -1,6 +1,11 @@
-from runstate.observables import Outcome
+import pytest
+from runstate import Outcome, Tier
 
 from runstate_tui.types import Issue, IssueKind, Row, Severity, Status, StatusKind
+
+
+def _term(*outcomes, tier=Tier.EXIT):
+    return Status.terminal(frozenset(outcomes), tier, detail=None)
 
 
 def test_severity_orders_and_maxes():
@@ -25,12 +30,24 @@ def test_issue_is_a_frozen_value():
     assert a.detail is None
 
 
-def test_terminal_wraps_outcome_and_labels_completed_as_done():
-    s = Status.terminal(Outcome.COMPLETED)
+def test_terminal_wraps_outcomes_and_labels_completed_as_done():
+    s = _term(Outcome.COMPLETED)
     assert s.kind is StatusKind.TERMINAL
-    assert s.outcome is Outcome.COMPLETED
+    assert s.outcomes == {Outcome.COMPLETED} and s.tier is Tier.EXIT
     assert s.label == "done"
-    assert Status.terminal(Outcome.KILLED).label == "killed"
+    assert _term(Outcome.KILLED).label == "killed"
+    assert _term(Outcome.LOST, tier=Tier.DIED).label == "lost"
+
+
+def test_several_outcomes_are_all_labelled_in_a_fixed_order():
+    # death reports that disagree: every outcome, none chosen, in display order
+    s = _term(Outcome.KILLED, Outcome.PREEMPTED, Outcome.ERRORED, tier=Tier.DIED)
+    assert s.label == "preempted/errored/killed"
+
+
+def test_a_terminal_status_has_an_outcome():
+    with pytest.raises(ValueError):
+        Status.terminal(frozenset(), Tier.EXIT, detail=None)
 
 
 def test_unknown_outcome_renders_honestly_not_a_default():
@@ -38,8 +55,15 @@ def test_unknown_outcome_renders_honestly_not_a_default():
     class FakeOutcome:
         value = "suspended"
 
-    s = Status.terminal(FakeOutcome())
+    s = Status.terminal(frozenset({FakeOutcome()}), Tier.EXIT, detail=None)
     assert s.label == "suspended"
+
+
+def test_a_log_in_another_format_is_a_loud_typed_status():
+    s = Status.log_format("0.3.0", "migrate it (runstate migrate)")
+    assert s.kind is StatusKind.LOG_FORMAT and s.severity is Severity.HIGH
+    assert s.label == "format 0.3.0" and s.detail == "migrate it (runstate migrate)"
+    assert Status.log_format(None, "onboard it").label == "unversioned"
 
 
 def test_status_severity_map():
@@ -47,7 +71,7 @@ def test_status_severity_map():
     assert Status.conflicted().severity is Severity.MEDIUM
     assert Status.pending().severity is Severity.INFO
     assert Status.live().severity is Severity.OK
-    assert Status.terminal(Outcome.COMPLETED).severity is Severity.OK
+    assert _term(Outcome.COMPLETED).severity is Severity.OK
 
 
 def test_corrupt_status_is_loud_not_reused_unreadable():

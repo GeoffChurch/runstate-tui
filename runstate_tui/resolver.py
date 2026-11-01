@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+
+from runstate import LOG_FORMAT
 
 RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
 Attrs = Mapping[str, str]  # per-row relational metadata — grouping + labeling ONLY (no fold input)
@@ -17,10 +20,34 @@ def const_resolver(ref: RunRef) -> Resolver:
     return lambda now: [(ref, {})]
 
 
+# A format's directory under a sqlite root: ``v`` plus the X.Y.Z version (runstate's
+# log-formats.md §3). The address grammar is protocol, but runstate exports no inverse of
+# it (path -> (root, run_id)), so the cockpit's two uses of it live here, together:
+# `ref_from_path` (discovery) and `sqlite_log_path` (the pool's vanished-file check).
+_FORMAT_DIR = re.compile(r"^v\d+\.\d+\.\d+$")
+
+
 def ref_from_path(path: str) -> RunRef:
-    """A sqlite run log lives at ``<root>/<run_id>.db``; split a path into its RunRef."""
+    """Split a sqlite log's path into the RunRef `attach_channel` takes. A log in format
+    X.Y.Z lives at ``<root>/vX.Y.Z/<run_id>.db``, and one from before versioned addresses
+    at ``<root>/<run_id>.db``; either names the run (run_id, root). Opening the ref is what
+    decides which format answers: the current one if the run has been migrated, else a
+    loud `LogFormatMismatch` / `LogFormatMissing` row. So every copy of one run (a sealed
+    older log, a legacy tombstone, the current log) is one ref, and one row.
+
+    The inverse is a guess where a root's own name looks like a format directory: a legacy
+    log at ``/data/v1.2.3/<rid>.db`` maps to root ``/data``. Only a runstate-side
+    enumerator could know (a finding); pass such a run by manifest instead."""
     p = Path(path)
-    return (p.stem, str(p.parent), "sqlite")
+    parent = p.parent
+    root = parent.parent if _FORMAT_DIR.match(parent.name) else parent
+    return (p.stem, str(root), "sqlite")
+
+
+def sqlite_log_path(ref: RunRef) -> Path:
+    """Where the current format (`runstate.LOG_FORMAT`) keeps a sqlite run's log."""
+    run_id, root, _backend = ref
+    return Path(root) / f"v{LOG_FORMAT}" / f"{run_id}.db"
 
 
 def explicit_resolver(refs: list[RunRef]) -> Resolver:
@@ -38,21 +65,23 @@ def explicit_resolver(refs: list[RunRef]) -> Resolver:
 
 
 def glob_resolver(root: str) -> Resolver:
-    """A LIVE resolver over a directory: each frame, discover every ``*.db`` run under
-    `root` (recursively) and return their (RunRef, {}) pairs. Uses ``Path.rglob`` -- which does NOT
-    recurse into symlinked directories -- so a cyclic symlink can neither hang nor explode
-    the scan (verified 2026-07-21). Matches open via ``attach_channel`` (never create), so
-    a stale / foreign / half-written ``.db`` reads ``missing`` / ``unreadable`` and is left
-    byte-identical -- the fold classifies it, the resolver does not pre-filter. Order is
+    """A LIVE resolver over a directory: each frame, discover every ``*.db`` run log under
+    `root` (recursively), in any format, and return one (RunRef, {}) pair per run. Uses
+    ``Path.rglob`` -- which does NOT recurse into symlinked directories -- so a cyclic
+    symlink can neither hang nor explode the scan (verified 2026-07-21). Matches open via
+    ``attach_channel`` (never create), so a stale / foreign / half-written ``.db`` reads
+    ``missing`` / ``unreadable`` / a format row and is left byte-identical -- the fold
+    classifies it, the resolver does not pre-filter. Order is
     irrelevant: the table sorts on the (disambiguated) run column."""
     root_path = Path(root)
 
     def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
-        # No dedup: rglob yields each path once and ref_from_path is injective over distinct
-        # paths (a symlinked file and its target still have distinct paths). Unlike
-        # explicit_resolver, whose CLI args can legitimately repeat, glob has no dup source.
+        # Dedup, order preserved: one run has a log per format it has been migrated
+        # through (the current one, sealed older ones, a legacy tombstone), and
+        # ref_from_path maps every copy to the same ref -- one run, one row.
         # Attribute-less: paired with empty attrs (the label comes from `disambiguate`).
-        return [(ref_from_path(str(p)), {}) for p in root_path.rglob("*.db")]
+        refs = dict.fromkeys(ref_from_path(str(p)) for p in root_path.rglob("*.db"))
+        return [(r, {}) for r in refs]
 
     return resolve
 

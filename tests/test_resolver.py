@@ -258,3 +258,30 @@ def test_manifest_non_string_attr_value_raises(tmp_path):
     )
     with pytest.raises(TypeError):
         manifest_resolver(path)(0.0)
+
+
+def test_ref_from_path_strips_a_format_directory(tmp_path):
+    # a log in format X.Y.Z lives at <root>/vX.Y.Z/<rid>.db (runstate log-formats.md §3):
+    # its ref names the run by (rid, root), whichever format the file is in
+    from runstate_tui.resolver import ref_from_path, sqlite_log_path
+
+    root = str(tmp_path)
+    assert ref_from_path(f"{root}/v0.4.0/r.db") == ("r", root, "sqlite")
+    assert ref_from_path(f"{root}/v0.3.0/r.db") == ("r", root, "sqlite")
+    assert ref_from_path(f"{root}/r.db") == ("r", root, "sqlite")  # the legacy address
+    assert ref_from_path(f"{root}/v1/r.db") == ("r", f"{root}/v1", "sqlite")  # not a format
+    assert sqlite_log_path(("r", root, "sqlite")) == tmp_path / "v0.4.0" / "r.db"
+
+
+def test_glob_resolver_shows_a_migrated_run_once(tmp_path):
+    # after `runstate migrate` a run has its current log, sealed older copies, and a
+    # legacy tombstone: four files, one run, one row
+    from runstate_tui.resolver import glob_resolver
+
+    for d in ("v0.4.0", "v0.3.0", "v0.2.0"):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "r.db").write_text("")
+    (tmp_path / "r.db").write_text("")  # the tombstone
+    (tmp_path / "v0.3.0" / "only-old.db").write_text("")  # not migrated yet: its own row
+    refs = [ref for ref, _attrs in glob_resolver(str(tmp_path))(0.0)]
+    assert sorted(refs) == [("only-old", str(tmp_path), "sqlite"), ("r", str(tmp_path), "sqlite")]

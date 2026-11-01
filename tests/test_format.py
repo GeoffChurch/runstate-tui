@@ -1,12 +1,14 @@
-from runstate.observables import Outcome
+from runstate import Envelope, Outcome, Tier
 
 from runstate_tui.format import format_row
-from runstate_tui.types import Issue, IssueKind, Row, Severity, Status
+from runstate_tui.types import Issue, IssueKind, Reading, Row, Severity, Status
+
+
+def _term(*outcomes, tier=Tier.EXIT, detail=None):
+    return Status.terminal(frozenset(outcomes), tier, detail=detail)
 
 
 def _env_stub():
-    from runstate.channel import Envelope
-
     return Envelope(seq=1, topic="control.stop", name=None, request_id=None, body={})
 
 
@@ -28,14 +30,36 @@ def _row(**kw):
 
 def test_format_row_full_quintet():
     row = _row(
-        status=Status.live(), frontier=7, freshness=10.0, value=("loss", 0.03, 7), elapsed=50.0
+        status=Status.live(),
+        frontier=7,
+        freshness=10.0,
+        value=Reading("loss", 0.03, 7),
+        elapsed=50.0,
     )
     text = format_row(row)
     assert "live" in text
-    assert "step 7" in text
+    assert "7 commits" in text
     assert "10s ago" in text
     assert "loss=0.03 @ 7" in text
     assert "ran 50s" in text
+
+
+def test_format_row_shows_every_outcome_and_the_death_evidence():
+    row = _row(
+        status=_term(
+            Outcome.PREEMPTED, Outcome.KILLED, tier=Tier.DIED, detail="slurm:X; reap: signal 9"
+        )
+    )
+    assert format_row(row) == "preempted/killed: slurm:X; reap: signal 9"
+
+
+def test_format_row_of_a_log_in_another_format_names_it():
+    assert format_row(_row(status=Status.log_format("0.3.0", "migrate it"))) == (
+        "format 0.3.0: migrate it"
+    )
+    assert format_row(_row(status=Status.log_format(None, "onboard it"))) == (
+        "unversioned: onboard it"
+    )
 
 
 def test_format_row_missing_is_just_the_label():
@@ -43,13 +67,13 @@ def test_format_row_missing_is_just_the_label():
 
 
 def test_format_row_appends_terminal_detail_when_present():
-    row = _row(status=Status.terminal(Outcome.ERRORED, detail="OOM killed"))
+    row = _row(status=_term(Outcome.ERRORED, detail="OOM killed"))
     text = format_row(row)
     assert text.startswith("errored: OOM killed")
 
 
 def test_format_row_omits_detail_suffix_when_absent():
-    row = _row(status=Status.terminal(Outcome.COMPLETED))
+    row = _row(status=_term(Outcome.COMPLETED))
     assert format_row(row) == "done"
 
 
@@ -79,16 +103,12 @@ def test_format_row_surfaces_issue_badges():
 
 
 def test_format_row_flags_undischarged_stops():
-    from runstate.channel import Envelope
-
     stop = Envelope(seq=5, topic="control.stop", name=None, request_id="webui:s", body={})
     text = format_row(_row(frontier=3, undischarged_stops=(stop,)))
     assert "■1" in text
 
 
 def test_format_envelope_is_a_compact_one_liner():
-    from runstate.channel import Envelope
-
     from runstate_tui.format import format_envelope
 
     e = Envelope(seq=4, topic="control.stop", name=None, request_id="webui:x", body={})
@@ -100,8 +120,6 @@ def test_format_envelope_escapes_embedded_newline_in_request_id():
     # A corrupted/adversarial request_id containing raw control chars must NOT
     # split one envelope across multiple RichLog lines (invariant #6) -- the
     # whole assembled line is escaped, not just body, so request_id is covered.
-    from runstate.channel import Envelope
-
     from runstate_tui.format import format_envelope
 
     e = Envelope(seq=4, topic="control.stop", name=None, request_id="webui:evil\nline2", body={})
@@ -113,8 +131,6 @@ def test_format_envelope_escapes_embedded_newline_in_request_id():
 def test_format_envelope_normal_dict_body_unchanged():
     # A normal dict body renders exactly as before -- the final whole-line
     # escape must not introduce spurious escaping for the common case.
-    from runstate.channel import Envelope
-
     from runstate_tui.format import format_envelope
 
     e = Envelope(seq=4, topic="control.stop", name=None, request_id="webui:x", body={"a": 1})
@@ -132,8 +148,12 @@ def test_status_color_maps_kinds_and_outcomes():
     assert status_color(Status.corrupt()) == "#f85149"
     assert status_color(Status.unreadable()) == "#f85149"
     assert status_color(Status.error()) == "#f85149"
-    assert status_color(Status.terminal(Outcome.COMPLETED)) == "#539bf5"
-    assert status_color(Status.terminal(Outcome.ERRORED)) == "#f85149"
+    assert status_color(_term(Outcome.COMPLETED)) == "#539bf5"
+    assert status_color(_term(Outcome.ERRORED)) == "#f85149"
+    assert status_color(_term(Outcome.LOST, tier=Tier.DIED)) == "#f85149"
+    assert status_color(_term(Outcome.PREEMPTED)) == "#d29922"
+    # several outcomes: the worst one's color (a failure beside a preemption is red)
+    assert status_color(_term(Outcome.PREEMPTED, Outcome.KILLED, tier=Tier.DIED)) == "#f85149"
 
 
 def test_topic_color_by_family():
@@ -142,6 +162,7 @@ def test_topic_color_by_family():
     assert topic_color("lifecycle.started") == "#539bf5"
     assert topic_color("control.stop") == "#d29922"
     assert topic_color("value") == "#3fb950"
+    assert topic_color("supervisor.died") == "#a371f7"
     assert topic_color("something.else") == "#8b949e"
 
 
@@ -167,7 +188,7 @@ def test_summary_card_colors_only_the_dot_not_the_whole_line():
         status=Status.live(),
         frontier=7,
         freshness=10.0,
-        value=("loss", 0.03, 7),
+        value=Reading("loss", 0.03, 7),
         elapsed=50.0,
     )
     card = format_summary_card(row)
@@ -186,7 +207,7 @@ def test_summary_card_is_two_compact_lines_with_counts():
         status=Status.live(),
         frontier=1450,
         freshness=8.0,
-        value=("loss", 0.0123, 1450),
+        value=Reading("loss", 0.0123, 1450),
         elapsed=20.0,
         episode="local://h/1",
         undischarged_stops=(_env_stub(),),  # len 1
@@ -198,7 +219,19 @@ def test_summary_card_is_two_compact_lines_with_counts():
     assert "live" in plain and "loss=0.0123" in plain  # line 1: the summary
     assert "episode local://h/1" in plain  # line 2: episode
     assert "1 stop pending" in plain and "1 demand" in plain  # line 2: COUNTS, not lists
+    assert "verdict" not in plain  # a live run has none
     assert plain.count("\n") == 1  # exactly two lines
+
+
+def test_summary_card_names_the_viewpoint_a_verdict_rests_on():
+    from runstate_tui.format import format_summary_card
+
+    for tier, words in [
+        (Tier.EXIT, "verdict by the worker's exit"),
+        (Tier.DIED, "verdict by death report"),
+        (Tier.TERMINATED, "verdict by unclaimed launch"),
+    ]:
+        assert words in format_summary_card(_row(status=_term(Outcome.KILLED, tier=tier))).plain
 
 
 def test_fleet_summary_orders_worst_first_and_counts():
@@ -215,7 +248,7 @@ def test_fleet_summary_orders_worst_first_and_counts():
         ]
         + [_row(status=Status.live(), issues=(Issue(IssueKind.MALFORMED, Severity.MEDIUM, "bad"),))]
         + [_row(status=Status.live()) for _ in range(93)]
-        + [_row(status=Status.terminal(Outcome.COMPLETED)) for _ in range(3)]
+        + [_row(status=_term(Outcome.COMPLETED)) for _ in range(3)]
     )
     plain = format_fleet_summary(rows).plain
     assert "unreadable 30" in plain

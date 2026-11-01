@@ -49,8 +49,11 @@ sweep, with a real fixture to test against — otherwise defer (YAGNI).**
   runtime pivot (group by a tuple, or re-pivot without restart), and a labelled bucket for a run
   *missing* the group attr (it renders under an unnamed `── ──` section for now).
 - **Corruption-invisibility full-scan** — an opt-in, marked-expensive integrity scan; a per-run
-  drill-down action, not a hot-path fold concern.
-- **`conflicted`** — a liveness-overlay feature (see [`liveness-overlay`](liveness-overlay.md)); needs
-  `resolve()` / `launcher.terminated` probe corroboration, not a fold change.
+  drill-down action, not a hot-path fold concern. Narrower under 0.4.0: the stop fold reads every
+  stop and the value fold every value, so a tear there is loud; one in a topic no fold reads (a
+  value, with no objective set) is still invisible.
+- **`conflicted`** — a liveness-overlay feature (see [`liveness-overlay`](liveness-overlay.md)). Its
+  log-level half (disagreeing death reports) is runstate's verdict set now; the rest needs a probe,
+  not a fold change.
 - **`--follow-symlinks` / arbitrary `--glob PATTERN`** — additive glob-resolver options (runs inside
   symlinked dirs; power-user patterns), off by default for cycle safety.

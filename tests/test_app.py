@@ -10,14 +10,23 @@ from runstate_tui.confirm import ConfirmStopScreen
 from runstate_tui.control import StopOutcome, StopResult
 from runstate_tui.detail import DrillDownScreen
 from runstate_tui.env import Env
+from tests.helpers import corrupt_seq
+from tests.records import Script, write
+
+
+def _claimed_sqlite_run(tmp_path, commits=0):
+    ch = create_channel("r", root=tmp_path, backend="sqlite")
+    s = Script()
+    s.started(100.0)
+    for i in range(commits):
+        s.commit(134.0 + i)
+    write(ch, s.records)
+    ch.close()
+    return ("r", str(tmp_path), "sqlite")
 
 
 def _live_sqlite_run(tmp_path):
-    ch = create_channel("r", root=tmp_path, backend="sqlite")
-    ch.send({"handle": "local://h/1", "t": 100.0}, topic="lifecycle.started")
-    ch.send({"step": 7, "consumed_seq": 0, "t": 140.0}, topic="lifecycle.heartbeat")
-    ch.close()
-    return ("r", str(tmp_path), "sqlite")
+    return _claimed_sqlite_run(tmp_path, commits=7)  # last commit at t=140
 
 
 def test_single_run_app_renders_the_folded_row(tmp_path):
@@ -33,7 +42,7 @@ async def _render(tmp_path):
         await app.workers.wait_for_complete()  # threaded worker runs off the loop
         content = str(app.query_one("#run", Static).content)
         assert "live" in content
-        assert "step 7" in content
+        assert "7 commits" in content
 
 
 def test_ticks_reschedule_without_pile_up(tmp_path):
@@ -51,16 +60,9 @@ async def _reschedules(tmp_path):
 
 
 def test_byte_torn_renders_corrupt_not_crash(tmp_path):
-    import sqlite3
-
-    ch = create_channel("r", root=tmp_path, backend="sqlite")
-    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
-    ch.close()
-    conn = sqlite3.connect(str(tmp_path / "r.db"))
-    conn.execute("UPDATE log SET body = ? WHERE seq = 1", ("{not json",))
-    conn.commit()
-    conn.close()
-    asyncio.run(_shows_corrupt(("r", str(tmp_path), "sqlite")))
+    ref = _claimed_sqlite_run(tmp_path)
+    corrupt_seq(tmp_path, "r", 1, literal="{not json")
+    asyncio.run(_shows_corrupt(ref))
 
 
 async def _shows_corrupt(ref):
@@ -73,16 +75,9 @@ async def _shows_corrupt(ref):
 
 
 def test_alien_started_renders_malformed_not_crash(tmp_path):
-    import sqlite3
-
-    ch = create_channel("r", root=tmp_path, backend="sqlite")
-    ch.send({"handle": "h", "t": 100.0}, topic="lifecycle.started")
-    ch.close()
-    conn = sqlite3.connect(str(tmp_path / "r.db"))
-    conn.execute("UPDATE log SET body = ? WHERE seq = 1", ("42",))  # valid JSON, non-dict
-    conn.commit()
-    conn.close()
-    asyncio.run(_shows_no_crash(("r", str(tmp_path), "sqlite")))
+    ref = _claimed_sqlite_run(tmp_path)
+    corrupt_seq(tmp_path, "r", 1, literal="42")  # valid JSON, non-dict
+    asyncio.run(_shows_no_crash(ref))
 
 
 async def _shows_no_crash(ref):
