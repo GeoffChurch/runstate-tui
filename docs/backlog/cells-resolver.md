@@ -39,9 +39,10 @@ data plane, deliberately out of scope (runstate's separate visualization project
 
 runstate deliberately provides **no** cell/enumeration API — the app, not runstate, owns the layout
 adapters, and a `list_runs()` capability was refuted upstream. So a `cells` resolver hard-codes
-mycooc's pointer layout in the TUI, and that layout is itself still settling (the cell/run split is
-under deliberation in runstate's backlog). **Build it on a concrete need to dashboard a live mycooc
-sweep, with a real fixture to test against — otherwise defer (YAGNI).**
+mycooc's pointer layout in the TUI. That layout has settled (the cell/run split shipped in mycooc:
+run homes at `outputs/runs/<rid[:2]>/<rid>/`, cells as thin pointer dirs; runstate's `store.md`), so
+the gate is need alone. **Build it on a concrete need to dashboard a live mycooc sweep, with a real
+fixture to test against — otherwise defer (YAGNI).**
 
 ## Related deferred work
 

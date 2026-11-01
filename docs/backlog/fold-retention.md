@@ -25,4 +25,4 @@ now: a glob over mycooc's whole `outputs/` (6,121 runs) would cost minutes per f
 - **Upstream.** The count is cold O(lineage) because `count(Commits(), head)` needs the lineage, and
   `PrefixLen` keeps the count at every node, not only the head's. A head-only variant, or a commit
   that carries its own count, would make the frontier's cold read O(1). This is a runstate
-  question, recorded as a finding of the 0.4.0 upgrade.
+  question, filed as [runstate#66](https://github.com/GeoffChurch/runstate/issues/66).

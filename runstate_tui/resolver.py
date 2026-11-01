@@ -22,8 +22,9 @@ def const_resolver(ref: RunRef) -> Resolver:
 
 # A format's directory under a sqlite root: ``v`` plus the X.Y.Z version (runstate's
 # log-formats.md §3). The address grammar is protocol, but runstate exports no inverse of
-# it (path -> (root, run_id)), so the cockpit's two uses of it live here, together:
-# `ref_from_path` (discovery) and `sqlite_log_path` (the pool's vanished-file check).
+# it (path -> (root, run_id); runstate#64) and no "does this log still exist" (runstate#65),
+# so the cockpit's two uses of it live here, together: `ref_from_path` (discovery) and
+# `sqlite_log_path` (the pool's vanished-file check).
 _FORMAT_DIR = re.compile(r"^v\d+\.\d+\.\d+$")
 
 

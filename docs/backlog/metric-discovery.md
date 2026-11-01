@@ -23,7 +23,8 @@ missing enumerator, and is deleted rather than built.
   name its claim declared a source as nothing). A source's samples are answers to a subscription,
   read by request id (`answers`), so the picker offers `eager` only, until the column has a reading
   for a source. Raw-sent registers outside every lineage (a consumer's `status` value) appear in
-  neither set.
+  neither set. Whether runstate reads either publicly is
+  [runstate#67](https://github.com/GeoffChurch/runstate/issues/67).
 
 ## Across a group
 
