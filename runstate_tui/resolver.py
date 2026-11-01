@@ -5,8 +5,6 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from runstate import LOG_FORMAT
-
 RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
 Attrs = Mapping[str, str]  # per-row relational metadata — grouping + labeling ONLY (no fold input)
 Resolver = Callable[
@@ -22,9 +20,7 @@ def const_resolver(ref: RunRef) -> Resolver:
 
 # A format's directory under a sqlite root: ``v`` plus the X.Y.Z version (runstate's
 # log-formats.md §3). The address grammar is protocol, but runstate exports no inverse of
-# it (path -> (root, run_id); runstate#64) and no "does this log still exist" (runstate#65),
-# so the cockpit's two uses of it live here, together: `ref_from_path` (discovery) and
-# `sqlite_log_path` (the pool's vanished-file check).
+# it (path -> (root, run_id); runstate#64), so discovery's one use of it lives here.
 _FORMAT_DIR = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
@@ -43,12 +39,6 @@ def ref_from_path(path: str) -> RunRef:
     parent = p.parent
     root = parent.parent if _FORMAT_DIR.match(parent.name) else parent
     return (p.stem, str(root), "sqlite")
-
-
-def sqlite_log_path(ref: RunRef) -> Path:
-    """Where the current format (`runstate.LOG_FORMAT`) keeps a sqlite run's log."""
-    run_id, root, _backend = ref
-    return Path(root) / f"v{LOG_FORMAT}" / f"{run_id}.db"
 
 
 def explicit_resolver(refs: list[RunRef]) -> Resolver:

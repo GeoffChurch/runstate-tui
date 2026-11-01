@@ -7,9 +7,9 @@ from runstate import Channel, LogFormatError, RunNotFound, attach_channel
 
 from .env import Env
 from .fold import RunFolds
-from .resolver import Attrs, RunRef, sqlite_log_path
-from .table import _OPEN_ERRORS, EVICT_KINDS, _bare, _fold_error, fold_open_channel, open_row_for
-from .types import Row, Status
+from .resolver import Attrs, RunRef
+from .table import _OPEN_ERRORS, EVICT_KINDS, _fold_error, fold_open_channel, open_row_for
+from .types import Row
 
 Table = tuple[tuple[RunRef, Attrs, Row], ...]
 
@@ -68,20 +68,18 @@ class ChannelPool:
             self._open[ref] = pooled
         elif backend == "sqlite":
             # A CACHED sqlite handle keeps reading off its still-open inode even after the
-            # .db is unlinked out from under a live cockpit (WAL: the fd persists), so the
-            # fold would silently serve a phantom read that never self-heals. attach_channel
-            # cannot re-check an already-open handle — a per-tick stat is the ONLY detector
-            # for the vanished-cached-file case (a finding: no public "does this handle's
-            # log still exist"). Missing -> evict + honest `missing`; an unreadable dir ->
-            # evict + `unreadable`. (Cold opens above skip this: attach covers them.)
+            # .db is unlinked or moved out from under a live cockpit (WAL: the fd persists),
+            # so the fold would silently serve a phantom read that never self-heals. The
+            # never-creating re-attach is runstate's answer to "does this run's log still
+            # exist" (runstate#65; ~0.09 ms): it raises exactly as a cold open does, so a
+            # vanished log is `missing`, a run migrated away is the loud format row, and an
+            # unreadable one is `unreadable`, and the handle and its folds are evicted. A
+            # Postgres handle reads the live table, so it has no stale inode to catch.
             try:
-                sqlite_log_path(ref).stat()
-            except FileNotFoundError:
+                attach_channel(run_id, root=root, backend=backend).close()
+            except (RunNotFound, LogFormatError, *_OPEN_ERRORS) as exc:
                 self._evict(ref)
-                return _bare(Status.missing())
-            except OSError:
-                self._evict(ref)
-                return _bare(Status.unreadable())
+                return open_row_for(exc)
         self._open.move_to_end(ref)  # LRU: most-recently-used last
         row = fold_open_channel(pooled.channel, frame_env, pooled.folds)
         if row.status.kind in EVICT_KINDS:

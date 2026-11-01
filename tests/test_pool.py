@@ -106,20 +106,39 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
 def test_row_for_evicts_a_pooled_run_whose_db_file_vanishes(tmp_path):
     # The pool's cached-handle self-heal path: a cached sqlite handle keeps reading its
     # already-open (now-deleted) inode via the WAL fd, so the fold can't detect the loss --
-    # hence row_for retains a stat for CACHED handles only (attach_channel guards the
+    # hence row_for re-attaches CACHED handles each tick (attach_channel guards the
     # cold-open). A run's .db can vanish mid-session (deleted out from under a live cockpit)
-    # after the pool cached its channel; the NEXT fold's cached-handle stat must catch this,
-    # evict the now-dangling handle, and render a loud `missing` row -- not serve a phantom
-    # read off a channel whose backing file is gone.
+    # after the pool cached its channel; the NEXT fold's re-attach must catch this, evict
+    # the now-dangling handle, and render a loud `missing` row -- not serve a phantom read
+    # off a channel whose backing file is gone.
     ref = _seed(tmp_path, "a")
     env = Env(clock=lambda: 150.0)
     pool = ChannelPool(cap=8)
     fold_frame(pool, [(ref, {})], env, 150.0)  # first fold: opens + pools the channel
     assert ref in pool._open
     log_path(tmp_path, "a").unlink()
-    table = _rows(fold_frame(pool, [(ref, {})], env, 151.0))  # second fold: stat finds it gone
+    table = _rows(fold_frame(pool, [(ref, {})], env, 151.0))  # second fold: re-attach finds it gone
     assert table[ref].status.kind is StatusKind.MISSING
     assert ref not in pool._open  # evicted, not left dangling in the pool
+    pool.close_all()
+
+
+def test_row_for_shows_the_format_row_for_a_pooled_run_migrated_away(tmp_path):
+    # A run migrated to a newer format while the pool held its channel: the cached handle
+    # still reads the old inode, and a stat of the current-format path could only say
+    # `missing`. The re-attach raises as a cold open would, so the row is the loud format
+    # row naming the newer format, and the handle and its folds are evicted.
+    ref = _seed(tmp_path, "a")
+    env = Env(clock=lambda: 150.0)
+    pool = ChannelPool(cap=8)
+    fold_frame(pool, [(ref, {})], env, 150.0)
+    assert ref in pool._open
+    newer = tmp_path / "v9.0.0"
+    newer.mkdir()
+    log_path(tmp_path, "a").rename(newer / "a.db")
+    table = _rows(fold_frame(pool, [(ref, {})], env, 151.0))
+    assert table[ref].status.kind is StatusKind.LOG_FORMAT
+    assert ref not in pool._open
     pool.close_all()
 
 
