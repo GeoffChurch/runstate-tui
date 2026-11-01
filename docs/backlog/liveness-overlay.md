@@ -20,7 +20,8 @@ freshness (pure fold of the log's timestamps; universal, local or cross-host)
 The core commits to **freshness only** — pure, deterministic, topology-invariant, free on the
 340-run hot path. Everything richer is effectful and/or deployment-specific and belongs in this
 overlay. (This mirrors runstate's own split: the stateless observer plane gives freshness; the
-stateful `Watcher` gives arrival-time + handle probe.)
+stateful `Watcher` gives arrival-time, the probe of a handle it holds, and on Postgres the
+session probe.)
 
 ## The probe-backend family
 
@@ -36,29 +37,43 @@ An "external liveness probe" is not one thing — `os.kill` is only the *same-ho
 The cross-host scheduler probes are the important unlock: real liveness for the common
 SLURM/k8s deployments, where `os.kill` from the cockpit host means nothing.
 
+## What runstate 0.4.0 already settles
+
+Log format 0.4.0 moved a death from inference to a **record**, which changes this overlay's premise:
+
+- **A death is evidence, written down.** A claim ends by its own exit or by a `supervisor.died`
+  death report naming it (a launcher's reap, `report_if_dead`'s same-host or session probe, a
+  scheduler's accounting). No read probes a process: `live_episode` no longer resolves a handle,
+  and `peek_terminal` reads only records. The cockpit shows a death report as the verdict, with
+  its `evidence` as the detail (`killed: slurm:TIMEOUT`), and names the viewpoint
+  (`RunResult.tier`) in the drill-down card.
+- **An unreported crash reads as held.** Until someone with evidence reports it, the cockpit can
+  only age it to `stale` past `stuck_threshold` — inference, never a verdict. This is the gap the
+  overlay's probes fill: `presumed_dead` (below) is the probe's word that a held, stale claim's
+  process is gone. Whether the overlay should then also *write* that word (`report_if_dead`) is
+  open: the cockpit is otherwise a pure observer, and runstate's rule is "a read never writes".
+- **Disagreeing death reports are runstate's set, not a cockpit inference.** The verdict's
+  `outcomes` holds every report's outcome and chooses none, so two parties reporting one death
+  differently (`preempted` vs `killed`) is visible as `preempted/killed` with both evidences. That
+  is the log-level half of runstate#17's `conflicted` ask, answered upstream: no probe needed.
+
 ## What it unlocks (additively)
 
 - `presumed_dead` — a probe asserts `DEAD` where the log has no terminal record (the stateless
   core can only say `stale`).
 - probe-`conflicted` — a terminal record co-existing with a probe that says the process is alive
-  (a genuine contradiction the pure fold cannot see).
-- **log-level `conflicted` also belongs here.** The §4/§4.1 triggers — "two live episodes" and
-  "activity strictly after a terminal, no re-start" — look like a pure-log seq-ordering check, but a
-  pure-record check **fires on ordinary crash+relaunch**:
-  `live_episode` declares an episode dead via `resolve(handle) is False` with **no**
-  `lifecycle.stopped`, so `started → … → started` (no stop between) is the system's *normal*
-  recovery shape, and narrowing the read to `lifecycle.*`+`control.*` discards the
-  `launcher.terminated` evidence `peek_terminal` already uses. Reliable `conflicted` therefore
-  needs this overlay's `resolve()`/`launcher.terminated` corroboration to separate benign
-  supersession from genuine split-brain — it is a liveness feature, **not** a fold/seq gap. It
-  also needs a prior **product call** on the §4.1 row-3-vs-row-4 tension (does post-terminal
-  activity override to `conflicted`, or is a threshold-close straggler benign — a
-  `stuck_threshold`-flavored *policy* judgment, not an upstream fact). When built, it is a
-  MEDIUM **issue** on the real verdict ("undischarged prior claim — verify"), never a dominating
-  status; `StatusKind.CONFLICTED` currently exists at MEDIUM, unused. Judge by **seq, never `t`**.
-  Do NOT re-propose the "one seq-aware lifecycle fold" rewrite — it is rejected: the verdict fold is
-  assigned upstream per spec §3.2/§12, `lifecycle.*` includes unbounded heartbeats, and §3.1 forbids
-  a single open+all-reads guard.
+  (a genuine contradiction the pure fold cannot see). runstate's fence narrows this: a worker that
+  reads a death report naming its own claim writes nothing more, so a mistaken report leaves a
+  zombie *process*, never zombie *records*. Only a probe sees the process.
+- **log-level `conflicted`.** The 0.3.0 triggers no longer misfire. "Two live episodes" was the
+  normal crash+relaunch shape because a dead claim had no record; in 0.4.0 the newest claim is the
+  run's, and an older one stays held until a death report ends it. "Activity strictly after a
+  terminal" is now a writer bug, which runstate's exit and fence rule out. What remains is a
+  stranded older claim whose process may still be running (split-brain) versus one whose process
+  is gone, which only a probe can tell apart. When built, it is a MEDIUM **issue** on the real
+  verdict ("stranded prior claim — verify"), never a dominating status; `StatusKind.CONFLICTED`
+  exists at MEDIUM, unused. Judge by **seq, never `t`**. Do NOT re-propose the "one seq-aware
+  lifecycle fold" rewrite: the verdict fold is assigned upstream (spec §3.2/§12).
 - These enter the `Status` open coproduct as new self-describing members; the §4.1 precedence
   lattice gains rows **above** the terminal row, reconciled over the abstract `Liveness` value —
   no change to existing rows.
@@ -70,7 +85,7 @@ SLURM/k8s deployments, where `os.kill` from the cockpit host means nothing.
 - **Abstract `Liveness` (LIVE/STALE/DEAD)** — the fold reconciles over this, *never* over
   `os.kill` directly, so a new backend is transparent to the lattice.
 - **Deployment context from the resolver** — a SLURM-resolved group carries its `SlurmProbe`
-  down through `env`; the run→job-id mapping is parsed from the handle/launcher vocabulary
+  down through `env`; the run→job-id mapping is parsed from the handle/supervisor vocabulary
   (which per runstate's layering lives in `vocabulary/`, not the observable fold).
 
 ## Caveats that keep it an overlay, not core

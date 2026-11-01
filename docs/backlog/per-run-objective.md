@@ -43,9 +43,8 @@ keystroke, so it stacks on this without a second mechanism.
 
 ## Rejected: auto-detect
 
-`latest(VALUE, name=None)` is genuinely index-served (0.01 ms at 500k value records — it is the
-query `(topic, seq)` was built for), so "show whatever this run reported last" is cheap and
-zero-config. It is still wrong: it produces heterogeneity you did not *choose* — whichever metric
+"Show whatever this run reported last" is cheap and zero-config (`latest(VALUE)` is an index
+seek, and runstate's `streams()` lists the lineage's names). It is still wrong: it produces heterogeneity you did not *choose* — whichever metric
 happened to be written last — which is strictly worse than heterogeneity you declared.
 
 The tempting compromise, auto-detect in the single-run view only (where comparability is vacuous

@@ -1,25 +1,28 @@
 # Interactive objective — set the value metric from inside the cockpit
 
 `--objective NAME` fixes the value column's metric at launch. Changing it without restarting is the
-obvious next want, and the mechanism is nearly free — but it is **gated on runstate#19**, and the
-gate is the whole story.
+obvious next want, and the mechanism is nearly free. It was gated on runstate#19, whose premise is
+gone; what gates it now is a measured cold cost.
 
-## Why it's gated
+## The gate: one cold fold per run per name
 
-`latest(VALUE, name=objective)` is an index seek only when the name sits near the tail of the value
-partition. Neither backend indexes `name`, so a name that is absent, rare, or not yet emitted costs
-a full partition walk: **0.01 ms vs ~85 ms at 500k value records**, per run, per tick, on the owner
-thread. Across a 100-run fleet that is ~8.5 s/frame against a ~5 ms budget — the watchdog trips and
-the teardown drain leaks the pool.
+The value column is no longer a `latest(VALUE, name=…)` peek. Under log format 0.4.0 it is the
+objective's **last element on the head's lineage**, read through runstate's held `LastElement(name)`
+fold, which lives beside each run's channel and reads only the records since the last tick. So a
+name that is absent or not yet emitted costs O(new records) per tick, like any other: the 0.3.0
+miss cliff (~85 ms per run per tick at 500k value records) is gone. (runstate#19 also landed the
+name-aware index, but the cockpit no longer reads the value by `latest`.)
 
-Choosing a name once at launch survives this: you notice and restart. **Typing names interactively
-makes the miss case routine**, and the miss is precisely the interesting case — "show me the metric
-that hasn't appeared yet" is a use, not a mistake. No consumer-side mitigation works: a negative
-cache can't know when a metric first appears, and a `last_seq()` gate doesn't help live runs, which
-are the ones being watched.
+What a new name costs instead is a **cold** fold: a fresh `LastElement` reads every value record
+on the log once. Measured: ~17 ms for a 3.6k-record run (mycooc's median log), and it holds
+~100 B per record for as long as it is pooled. So a typed name costs one cold pass per pooled run,
+on the owner thread, once, not per tick. Across a 100-run group of median runs that is ~2 s of one
+frame, which the stall watchdog shows as `⚠ I/O stalled` for a tick. That is acceptable for an
+action the user took on `Submitted`, and it argues for:
 
-So: build this when **runstate#19** lands. Not before, and not scoped-down to route around it —
-that scoping would be the superseded path the no-legacy directive exists to prevent.
+- building the new folds **beside** the old ones and swapping when they are warm, so the column
+  never shows a frame folded with half the runs on the new name; and
+- dropping the old name's folds at the swap, since each holds memory proportional to its log.
 
 ## The invariant it must establish
 
@@ -54,9 +57,10 @@ Read correctly it argues for carrying a snapshot with the frame, which is the in
 apps construct it with a snapshot. Harmless while Env is constant — a latent capture-a-mutable-value
 bug the moment it isn't, and a drill-down held open across a change would show the old objective
 forever. Either the screen takes the Env source rather than a value, or (better, and worth deciding
-then) it stops folding independently altogether: it currently re-folds the same run **outside the
-pool**, cold-opening the channel every tick, while the owner thread already folds that run's `Row`
-with a warm pooled handle. If the card consumed the frame instead, this bug could not exist.
+then) it stops folding independently altogether: it holds its own folds (`HeldRun`) and re-opens the
+channel every tick **outside the pool**, while the owner thread already folds that run's `Row` with
+a warm pooled handle and folds of its own. So the same run is folded twice, and its folds' memory is
+held twice. If the card consumed the frame instead, this bug could not exist.
 
 ## Verified mechanics (Textual 8.2.8) — do not re-derive
 
@@ -73,8 +77,8 @@ with a warm pooled handle. If the card consumed the frame instead, this bug coul
   Compose order becomes load-bearing — the Input must come **after** the table.
 - `v` is free: not in `DataTable.BINDINGS`, and a subclass `BINDINGS` merges with the App defaults
   rather than replacing them, so `ctrl+q` survives.
-- Commit on `Input.Submitted`, never `Changed`: on `Changed`, every keystroke prefix is a miss —
-  i.e. a full scan per run per keystroke.
+- Commit on `Input.Submitted`, never `Changed`: on `Changed`, every keystroke prefix is a new name —
+  i.e. a cold fold per run per keystroke.
 
 ## Blast radius
 
@@ -90,10 +94,8 @@ came from, so building the sink first costs the picker nothing — it becomes a 
 free text stays permanently, for a structural reason rather than a contingent one: **no enumeration
 can name a metric that has not been emitted yet**, and naming one before it appears is a real want.
 
-What is *not* true — and was the original argument for doing this before
-[`metric-discovery`](metric-discovery.md) — is that the setter is upstream-independent. Both halves
-want the same `(topic, name, seq)` index, so runstate#19 is the shared prerequisite and neither
-strictly precedes the other.
+Neither half now waits on runstate: the setter's cost is the cold fold above, and the picker's
+source is runstate's `streams()` (see [`metric-discovery`](metric-discovery.md)).
 
 ## Out of scope
 
