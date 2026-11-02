@@ -270,6 +270,18 @@ def test_ref_from_path_strips_a_format_directory(tmp_path):
     assert ref_from_path(f"{root}/v0.3.0/r.db") == ("r", root, "sqlite")
     assert ref_from_path(f"{root}/r.db") == ("r", root, "sqlite")  # the legacy address
     assert ref_from_path(f"{root}/v1/r.db") == ("r", f"{root}/v1", "sqlite")  # not a format
+    # runstate's inverse (sqlite_address): an unregistered older vX.Y.Z/ directory is no
+    # format and no root, so no run; a newer format's names its root, labelled by the stem
+    assert ref_from_path(f"{root}/v0.1.5/r.db") is None
+    assert ref_from_path(f"{root}/v99.0.0/r.db") == ("r", root, "sqlite")
+
+
+def test_glob_resolver_skips_a_path_that_addresses_no_run(tmp_path):
+    from runstate_tui.resolver import glob_resolver
+
+    (tmp_path / "v0.1.5").mkdir()
+    (tmp_path / "v0.1.5" / "r.db").write_bytes(b"")
+    assert glob_resolver(str(tmp_path))(0.0) == []
 
 
 def test_glob_resolver_shows_a_migrated_run_once(tmp_path):

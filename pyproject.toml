@@ -24,7 +24,7 @@ packages = ["runstate_tui"]
 # PINNED to a commit, the 0.4.0 release (log format 0.4.0) that GeoffChurch/mycooc and
 # GeoffChurch/translation are migrating to: the cockpit reads their logs, and on 0.4.0 it refuses
 # every older-format log (LogFormatMismatch / LogFormatMissing), so its pin must move with theirs.
-runstate = { git = "https://github.com/GeoffChurch/runstate", rev = "e91bddb293c4ec459b1ca2fdad9b7f3861ad0e1e" }
+runstate = { git = "https://github.com/GeoffChurch/runstate", rev = "a6e9ea32b4f5d25ba6c8aa9c0394f270dde38d96" }
 
 [tool.ruff]
 line-length = 100

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+
+from runstate.formats import LegacyAddress, NewerFormatRoot, VersionedAddress, sqlite_address
 
 RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
 Attrs = Mapping[str, str]  # per-row relational metadata — grouping + labeling ONLY (no fold input)
@@ -18,27 +19,26 @@ def const_resolver(ref: RunRef) -> Resolver:
     return lambda now: [(ref, {})]
 
 
-# A format's directory under a sqlite root: ``v`` plus the X.Y.Z version (runstate's
-# log-formats.md §3). The address grammar is protocol, but runstate exports no inverse of
-# it (path -> (root, run_id); runstate#64), so discovery's one use of it lives here.
-_FORMAT_DIR = re.compile(r"^v\d+\.\d+\.\d+$")
+def ref_from_path(path: str) -> RunRef | None:
+    """The RunRef `attach_channel` takes for a sqlite log's path, by runstate's own
+    inverse of its address scheme (`runstate.formats.sqlite_address`, log-formats.md §3),
+    or None when the path is the address of no run (a sidecar, an unregistered older
+    ``vX.Y.Z/`` directory). Every copy of one run (its current log, sealed older ones, a
+    legacy tombstone) names the same (run_id, root), so it is one ref and one row; opening
+    the ref decides which answers, else a loud `LogFormatMismatch` / `LogFormatMissing` row.
 
-
-def ref_from_path(path: str) -> RunRef:
-    """Split a sqlite log's path into the RunRef `attach_channel` takes. A log in format
-    X.Y.Z lives at ``<root>/vX.Y.Z/<run_id>.db``, and one from before versioned addresses
-    at ``<root>/<run_id>.db``; either names the run (run_id, root). Opening the ref is what
-    decides which format answers: the current one if the run has been migrated, else a
-    loud `LogFormatMismatch` / `LogFormatMissing` row. So every copy of one run (a sealed
-    older log, a legacy tombstone, the current log) is one ref, and one row.
-
-    The inverse is a guess where a root's own name looks like a format directory: a legacy
-    log at ``/data/v1.2.3/<rid>.db`` maps to root ``/data``. Only a runstate-side
-    enumerator could know (a finding); pass such a run by manifest instead."""
+    A newer format's directory names only its root: that format's layout, and so its run
+    ids, cannot be known. Its row is labelled by the file's stem, a label and never a
+    claimed run id: every open under that root raises the newer-format mismatch whatever
+    the id, so the row reads "upgrade runstate"."""
     p = Path(path)
-    parent = p.parent
-    root = parent.parent if _FORMAT_DIR.match(parent.name) else parent
-    return (p.stem, str(root), "sqlite")
+    match sqlite_address(p):
+        case VersionedAddress(root=root, run_id=run_id) | LegacyAddress(root=root, run_id=run_id):
+            return (run_id, str(root), "sqlite")
+        case NewerFormatRoot(root=root):
+            return (p.stem, str(root), "sqlite")
+        case None:
+            return None
 
 
 def explicit_resolver(refs: list[RunRef]) -> Resolver:
@@ -69,9 +69,11 @@ def glob_resolver(root: str) -> Resolver:
     def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
         # Dedup, order preserved: one run has a log per format it has been migrated
         # through (the current one, sealed older ones, a legacy tombstone), and
-        # ref_from_path maps every copy to the same ref -- one run, one row.
+        # ref_from_path maps every copy to the same ref -- one run, one row. A path that
+        # addresses no run (an unregistered older vX.Y.Z/ directory) is no row.
         # Attribute-less: paired with empty attrs (the label comes from `disambiguate`).
-        refs = dict.fromkeys(ref_from_path(str(p)) for p in root_path.rglob("*.db"))
+        found = (ref_from_path(str(p)) for p in root_path.rglob("*.db"))
+        refs = dict.fromkeys(r for r in found if r is not None)
         return [(r, {}) for r in refs]
 
     return resolve

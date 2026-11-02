@@ -98,15 +98,21 @@ def _dispatch(cfg: CliArgs, parser: argparse.ArgumentParser) -> int:
             parser.error(f"manifest not found: {path}")
         _multirun(manifest_resolver(path), cfg, f"watching {path} — no runs yet")
         return 0
-    if len(paths) >= 2:
-        _multirun(explicit_resolver([ref_from_path(p) for p in paths]), cfg)
+    refs = [ref_from_path(p) for p in paths]
+    if None in refs:
+        # a path the user named is no run's address: say so, never a phantom row
+        bad = [p for p, r in zip(paths, refs, strict=True) if r is None]
+        parser.error(f"not the address of a runstate log: {', '.join(bad)}")
+    named = [r for r in refs if r is not None]
+    if len(named) >= 2:
+        _multirun(explicit_resolver(named), cfg)
         return 0
     # a single run.db -- the only non-multi-run target, so grouping has no meaning here.
     if cfg.group_by is not None:
         parser.error(
             "--group-by applies to a directory / manifest / multiple runs, not a single run"
         )
-    SingleRunApp(ref_from_path(paths[0]), _env(cfg)).run()  # blocks until quit
+    SingleRunApp(named[0], _env(cfg)).run()  # blocks until quit
     return 0
 
 
