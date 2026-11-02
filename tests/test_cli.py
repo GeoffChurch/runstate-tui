@@ -239,3 +239,11 @@ def test_objective_accepts_any_name(monkeypatch, tmp_path):
     monkeypatch.setattr(m.MultiRunApp, "run", lambda self: made.setdefault("multi", self))
     m.main([_empty_manifest(tmp_path), "--objective=no_such_metric"])  # equals form too
     assert made["multi"]._env.objective == "no_such_metric"
+
+
+def test_a_path_that_addresses_no_run_is_a_usage_error(tmp_path, capsys):
+    # runstate's inverse says an unregistered older vX.Y.Z/ directory holds no run's log:
+    # a usage error naming the path, never a phantom row
+    bad = str(tmp_path / "v0.1.5" / "r.db")
+    assert main([bad]) == 2
+    assert "not the address of a runstate log" in capsys.readouterr().err
