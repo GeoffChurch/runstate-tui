@@ -246,9 +246,10 @@ class DrillDownScreen(Screen[None]):
         self._marshal(self._show_card, format_summary_card(row))
         # log: incremental raw delta (unfiltered accumulation -> clean cursor); the
         # filter is applied in _render_window over the bounded window.
-        # UPSTREAM(runstate#15): when the substrate filters + supports backward reads,
-        # pass filter=self._predicate() here (true retroactive filtering); v1 accumulates
-        # raw and filters the window in _render_window. grep -rn "UPSTREAM(runstate#15)"
+        # UPSTREAM(runstate filtered-reads): when the substrate serves a filtered backward
+        # read, pass filter=self._predicate() here (true retroactive filtering); v1
+        # accumulates raw and filters the window in _render_window.
+        # grep -rn "UPSTREAM(runstate filtered-reads)"
         delta = read_log_delta(self._ref, after=self._cursor)
         if delta:
             self._marshal(self._absorb, delta)  # main-thread: mutate window/cursor + render

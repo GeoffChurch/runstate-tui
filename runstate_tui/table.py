@@ -227,10 +227,11 @@ def read_log_delta(
         return []
     finally:
         channel.close()
-    # UPSTREAM(runstate#15): v1 applies the predicate here in Python. When runstate's
-    # read() gains filter= (+ before=/max_seq= for backward reads), push `filter` into
-    # channel.read so the SUBSTRATE filters and history is retroactively filterable.
-    # Discover all revisit sites with: grep -rn "UPSTREAM(runstate#15)"
+    # UPSTREAM(runstate filtered-reads): v1 applies the predicate here in Python. If runstate's
+    # read() gains a filtered backward read (GeoffChurch/runstate's
+    # docs/backlog/filtered-reads.md, ask 1), push the index-served part of `filter` into
+    # channel.read so history is retroactively filterable; a substring match stays here.
+    # Discover all revisit sites with: grep -rn "UPSTREAM(runstate filtered-reads)"
     return [e for e in got if filter is None or filter(e)]
 
 
@@ -241,8 +242,9 @@ def envelope_filter(text: str, hidden_families: set[str]) -> Callable[[Envelope]
     every record carries; log format 0.4.0 records carry no `step`). hidden_families:
     topic families to HIDE (the toggled-off KNOWN families) — a topic whose family
     is NOT in this set always shows, so supervisor.* / any unclassified topic is never
-    silently dropped (the log streams every record). The daemon/upstream #15 will
-    serve this as read(filter=…)."""
+    silently dropped (the log streams every record). Substring and negation are not in
+    runstate's read() vocabulary (GeoffChurch/runstate's docs/backlog/filtered-reads.md,
+    ask 2), so this predicate stays client-side."""
     text = text.strip()
     seqbound: int | None = None
     if text.startswith("seq>") and text[4:].strip().isdigit():

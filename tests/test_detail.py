@@ -330,8 +330,8 @@ async def _filter(tmp_path):
         screen._render_window()  # simulate typed filter
         t = screen.query_one("#detail-log", DataTable)
         topics = [t.get_cell_at(Coordinate(r, 1)).plain for r in range(t.row_count)]
-        # UPSTREAM(runstate#15): v1 filters the in-memory window; when #15 lands, this
-        # flips to assert the filter pushes into read_log_delta's read
+        # UPSTREAM(runstate filtered-reads): v1 filters the in-memory window; when a filtered
+        # read lands, this flips to assert the filter pushes into read_log_delta's read
         assert all("control" in x for x in topics) and t.row_count >= 1
 
 
@@ -342,7 +342,7 @@ def test_on_input_changed_narrows_via_the_real_widget(tmp_path):
 async def _on_input_changed(tmp_path):
     # exercises on_input_changed's actual wiring (a real Input.Changed message ->
     # self._filter_text -> _render_window), unlike test_filter_narrows_to_matching_rows
-    # above (and its UPSTREAM(runstate#15) test-lock), which sets `_filter_text`
+    # above (and its UPSTREAM(runstate filtered-reads) test-lock), which sets `_filter_text`
     # directly and calls `_render_window()` itself, bypassing the handler entirely.
     ref = _seed_rich(tmp_path)  # 5 rows incl. control.* and lifecycle.*
     app = _HostApp(ref)
