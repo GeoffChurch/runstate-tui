@@ -139,16 +139,17 @@ enumerates all N.
 
 ## Scale constraints (measured on real logs — respect these)
 
-- **A warm row costs ~0.1 ms, whatever the log's size** (measured from 3k to 60k records). Each tick
-  polls runstate's held folds, which read only the records since the last tick, so a 100-run group is
-  ~10 ms/frame, free at 1 Hz.
-- **A cold row reads the log once.** A run's first poll costs ~10 µs per record, ~35–45 ms for
-  mycooc's median log (3.6k records; 6,121 logs, p90 6k, max 14k). Log format 0.4.0 has no O(1) read
-  of the commit count: `count(Commits(), head)` needs the lineage. So a group's first frame is
-  O(log) per run, and a group larger than the pool re-folds evicted runs cold every frame (see
-  [`fold-retention`](backlog/fold-retention.md)).
-- **Held folds hold ~140 B per record** (~0.5 MB for a median mycooc run): `PrefixLen` and
-  `LastElement` keep a per-node map. The pool bounds it as it bounds fds.
+- **A warm row costs ~0.35 ms, whatever the log's size**, plus ~0.36 ms for the pool's re-attach check
+  (measured 2026-11-02 on 40 mycooc runs). Each tick polls runstate's held folds, which read only the
+  records since the last tick, so a 100-run group is ~70 ms/frame, fine at 1 Hz.
+- **A cold row reads the log once.** A run's first poll costs ~54 ms median, ~100 ms p90, for mycooc's
+  logs (median 3.6k records; 6,125 logs), ~70% of it the objective's `LastElement`. So a group's first
+  frame is O(log) per run, and a group larger than the pool re-folds evicted runs cold every frame:
+  9 mycooc experiments exceed the cap, the largest with 904 runs (see
+  [`fold-retention`](backlog/fold-retention.md), and the ended-row cache that answers it,
+  [#36](https://github.com/GeoffChurch/runstate-tui/issues/36)).
+- **Held folds hold ~0.7 MB for a median mycooc run**: `PrefixLen` and `LastElement` keep a per-node
+  map, and `LastElement` every value's name. The pool bounds it as it bounds fds.
 - **A `SqliteChannel` holds 3 fds** → a naive viewer EMFILEs at ~340 open runs. **The LRU pool is
   not optional.**
 - **No per-frame one-shot lineage reads.** `series`, `aligned`, `streams` and the pure

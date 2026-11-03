@@ -32,8 +32,9 @@ describes what is still open, not what already landed; git history carries the p
   `streams()` (the lineage's eager and source names; one-shot, one run). Unblocked; what it cannot
   list (unemitted names, other branches, registers) is recorded there.
 - [fold-retention](fold-retention.md) — a group larger than the pool cap re-folds runs cold every
-  frame under 0.4.0's held folds (~35–45 ms per median mycooc run). Open: retain folds past their
-  channel, spread the first frame, and an upstream O(1) frontier.
+  frame (~54 ms per median mycooc run; 9 mycooc experiments exceed the cap, the largest 904 runs). The
+  plan, [#36](https://github.com/GeoffChurch/runstate-tui/issues/36): cache an ended run's row by its
+  `last_seq`, and spread the first frame.
 - [postgres-resolver](postgres-resolver.md) — discover runs whose logs live on a Postgres server.
   Gated on mycooc's stage 3 ([mycooc#2](https://github.com/GeoffChurch/mycooc/issues/2): live channels on
   `PostgresChannel`): until then no consumer's runs are
