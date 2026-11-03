@@ -56,5 +56,4 @@ fixture to test against — otherwise defer (YAGNI).**
 - **`conflicted`** — a liveness-overlay feature (see [`liveness-overlay`](liveness-overlay.md)). Its
   log-level half (disagreeing death reports) is runstate's verdict set now; the rest needs a probe,
   not a fold change.
-- **`--follow-symlinks` / arbitrary `--glob PATTERN`** — additive glob-resolver options (runs inside
-  symlinked dirs; power-user patterns), off by default for cycle safety.
+- **Arbitrary `--glob PATTERN`** — an additive glob-resolver option for power-user patterns.

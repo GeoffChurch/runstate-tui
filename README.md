@@ -52,7 +52,7 @@ Point it at whatever you have — it picks the right view from the shape of the 
 | Target | What you get |
 |---|---|
 | `runstate-tui run.db` | one run, focused (single-run view) |
-| `runstate-tui runs/` | every run log under a directory, recursively — live (glob) |
+| `runstate-tui runs/` | every run log under a directory, recursively and through symlinked directories — live (glob) |
 | `runstate-tui exp.json` | the runs listed in a manifest, each carrying attributes |
 | `runstate-tui a.db b.db …` | an explicit set of runs |
 

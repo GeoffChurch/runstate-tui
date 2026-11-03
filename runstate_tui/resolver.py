@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+import os
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from runstate.formats import LegacyAddress, NewerFormatRoot, VersionedAddress, sqlite_address
@@ -55,15 +56,35 @@ def explicit_resolver(refs: list[RunRef]) -> Resolver:
     return resolve
 
 
+def _db_files(root: Path) -> Iterator[Path]:
+    """Every ``*.db`` file under `root`, recursively, following symlinked directories and
+    entering each real directory once (keyed by device and inode). A consumer that links
+    its cells to run homes (mycooc's ``<cell>/run -> runs/<shard>/<rid>/``) keeps every
+    log behind a link; the once-only rule makes a cycle end where it closes, and a home
+    reached by several links is one walk, so one row. A directory that vanishes or cannot
+    be read mid-walk is skipped."""
+    seen: set[tuple[int, int]] = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        try:
+            st = os.stat(dirpath)
+        except OSError:
+            dirnames.clear()
+            continue
+        if (st.st_dev, st.st_ino) in seen:
+            dirnames.clear()
+            continue
+        seen.add((st.st_dev, st.st_ino))
+        yield from (Path(dirpath, f) for f in filenames if f.endswith(".db"))
+
+
 def glob_resolver(root: str) -> Resolver:
     """A LIVE resolver over a directory: each frame, discover every ``*.db`` run log under
-    `root` (recursively), in any format, and return one (RunRef, {}) pair per run. Uses
-    ``Path.rglob`` -- which does NOT recurse into symlinked directories -- so a cyclic
-    symlink can neither hang nor explode the scan (verified 2026-07-21). Matches open via
-    ``attach_channel`` (never create), so a stale / foreign / half-written ``.db`` reads
-    ``missing`` / ``unreadable`` / a format row and is left byte-identical -- the fold
-    classifies it, the resolver does not pre-filter. Order is
-    irrelevant: the table sorts on the (disambiguated) run column."""
+    `root` (recursively, through symlinked directories, `_db_files`), in any format, and
+    return one (RunRef, {}) pair per run. Matches open via ``attach_channel`` (never
+    create), so a stale / foreign / half-written ``.db`` reads ``missing`` /
+    ``unreadable`` / a format row and is left byte-identical -- the fold classifies it,
+    the resolver does not pre-filter. Order is irrelevant: the table sorts on the
+    (disambiguated) run column."""
     root_path = Path(root)
 
     def resolve(_now: float) -> list[tuple[RunRef, Attrs]]:
@@ -72,7 +93,7 @@ def glob_resolver(root: str) -> Resolver:
         # ref_from_path maps every copy to the same ref -- one run, one row. A path that
         # addresses no run (an unregistered older vX.Y.Z/ directory) is no row.
         # Attribute-less: paired with empty attrs (the label comes from `disambiguate`).
-        found = (ref_from_path(str(p)) for p in root_path.rglob("*.db"))
+        found = (ref_from_path(str(p)) for p in _db_files(root_path))
         refs = dict.fromkeys(r for r in found if r is not None)
         return [(r, {}) for r in refs]
 

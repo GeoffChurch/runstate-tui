@@ -92,10 +92,31 @@ def test_glob_resolver_is_symlink_cycle_safe(tmp_path):
     (tmp_path / "a.db").write_text("")
     (tmp_path / "sub" / "b.db").write_text("")
     os.symlink(tmp_path, tmp_path / "sub" / "loop")  # a DIRECTORY cycle
-    # Must RETURN (not hang) and NOT explode into sub/loop/sub/loop/... entries:
-    # pathlib.rglob does not recurse into symlinked directories.
+    # Must RETURN (not hang) and NOT explode into sub/loop/sub/loop/... entries: the walk
+    # enters each real directory once, so the cycle ends where it closes.
     refs = glob_resolver(str(tmp_path))(0.0)
     assert sorted(ref[0] for ref, _attrs in refs) == ["a", "b"]
+
+
+def test_glob_resolver_finds_runs_behind_cell_links_once(tmp_path):
+    # mycooc's layout: an experiment's cells each hold `run -> runs/<shard>/<rid>/`, the
+    # run home, whose log is at `v0.4.0/<rid>.db` beside sealed older formats. Two cells
+    # linking one home are one run, one row; the home's older-format copies fold into it.
+    import os
+
+    from runstate_tui.resolver import glob_resolver
+
+    home = tmp_path / "runs" / "ab" / "abc"
+    for fmt in ("v0.3.0", "v0.4.0"):
+        (home / fmt).mkdir(parents=True)
+        (home / fmt / "abc.db").write_text("")
+    exp = tmp_path / "experiments" / "e1"
+    for cell in ("seed1", "seed2"):
+        (exp / cell).mkdir(parents=True)
+        os.symlink(home, exp / cell / "run")
+
+    refs = [ref for ref, _attrs in glob_resolver(str(exp))(0.0)]
+    assert [r[0] for r in refs] == ["abc"]
 
 
 def test_disambiguate_is_a_noop_when_stems_are_unique():
@@ -154,11 +175,9 @@ def test_disambiguate_renders_absolute_anchor_without_double_slash():
     assert labels[ref_key(b)] == "r/r/trial"
 
 
-def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):
-    # Pins the load-bearing pathlib guarantee (spec symlink table): rglob MATCHES a
-    # symlinked *file* (the common `latest.db -> run.db` pattern) but does NOT recurse into
-    # a symlinked *directory* (the documented fail-safe gap). A regression to
-    # glob.glob(recursive=True) would flip the second assert (and explode on cycles).
+def test_glob_resolver_matches_symlinked_files_and_dirs(tmp_path):
+    # A symlinked *file* (the common `latest.db -> run.db` pattern) is matched, and a run
+    # inside a symlinked *directory* is found.
     import os
 
     from runstate_tui.resolver import glob_resolver
@@ -174,12 +193,12 @@ def test_glob_resolver_matches_symlinked_file_but_not_symlinked_dir(tmp_path):
     root.mkdir()
     (root / "local.db").write_text("")
     os.symlink(ext_file, root / "latest.db")  # symlinked FILE -> matched
-    os.symlink(ext_dir, root / "linked")  # symlinked DIR  -> NOT recursed
+    os.symlink(ext_dir, root / "linked")  # symlinked DIR  -> recursed
 
     run_ids = sorted(ref[0] for ref, _attrs in glob_resolver(str(root))(0.0))
     assert "local" in run_ids
     assert "latest" in run_ids  # symlinked file IS found
-    assert "inside" not in run_ids  # run inside a symlinked dir is NOT (fail-safe gap)
+    assert "inside" in run_ids  # run inside a symlinked dir IS found
 
 
 def _write_manifest(tmp_path, obj):
