@@ -3,11 +3,11 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from runstate import create_channel
+from runstate import SqliteLogs
 
 from runstate_tui.env import Env
 from runstate_tui.fold import RunFolds, status_fold
-from runstate_tui.resolver import const_resolver
+from runstate_tui.resolver import const_resolver, place_of
 from runstate_tui.table import open_and_fold, render_single, render_table
 from runstate_tui.types import IssueKind, Severity, StatusKind
 from tests.helpers import corrupt_seq, log_path, move_log
@@ -23,7 +23,7 @@ def _folds():
 
 
 def _sqlite_run(tmp_path, run_id, script):
-    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create(run_id)
     write(ch, script.records)
     ch.close()
 
@@ -46,9 +46,9 @@ def test_open_and_fold_healthy_run(tmp_path):
 def test_missing_pointer_is_missing_and_creates_no_phantom(tmp_path):
     ref = ("ghost", str(tmp_path), "sqlite")
     row = open_and_fold(ref, _env(), _folds())
-    assert row.status.kind is StatusKind.MISSING  # attach_channel -> RunNotFound
+    assert row.status.kind is StatusKind.MISSING  # the reader -> RunNotFound
     assert row.frontier is None and row.issues == ()
-    assert not log_path(tmp_path, "ghost").exists()  # attach_channel never creates a file
+    assert not log_path(tmp_path, "ghost").exists()  # a reader never creates a file
     assert not (Path(tmp_path) / "v0.4.0").exists()  # ... nor the format's directory
 
 
@@ -142,16 +142,11 @@ def test_unreadable_parent_dir_is_unreadable(tmp_path):
         d.chmod(0o755)  # restore so tmp_path cleanup works
 
 
-def test_open_and_fold_memory_backend_attaches_a_run_with_records():
-    # the memory backend has no file to stat; open_and_fold attaches by registry lookup.
-    # A run WITH records attaches (not RunNotFound) and folds to a real status. The
-    # registry key is (abspath(root), run_id), so the birth root must match the ref's
-    # root ("" here) for attach to find the same log.
-    run_id = "r"
-    ch = create_channel(run_id, root="", backend="memory")
-    write(ch, _claimed().records)
-    row = open_and_fold((run_id, "", "memory"), _env(), _folds())
-    assert row.status.kind is StatusKind.LIVE  # attached + folded to a real status
+def test_a_ref_naming_a_backend_the_cockpit_cannot_open_is_a_loud_error():
+    # A ref's backend is a string from a path or a manifest; `place_of` reads it in one
+    # place, and an in-process memory log, which no ref can name, or a typo raises there.
+    with pytest.raises(ValueError, match="unknown backend 'memory'"):
+        place_of(("r", "", "memory"))
 
 
 def test_singleton_test_single_run_is_the_table_at_one(tmp_path):
@@ -254,7 +249,7 @@ def test_fold_open_channel_maps_byte_torn_to_corrupt(tmp_path):
 
     _sqlite_run(tmp_path, "r", _claimed())
     corrupt_seq(tmp_path, "r", 1, literal="{not json")
-    ch = create_channel("r", root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create("r")
     assert fold_open_channel(ch, _env(150.0), _folds()).status.kind is StatusKind.CORRUPT
     ch.close()
 

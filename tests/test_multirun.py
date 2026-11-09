@@ -3,7 +3,7 @@ import threading
 import time
 
 from rich.text import Span
-from runstate import create_channel
+from runstate import SqliteLogs
 from textual.widgets import DataTable, Static
 
 import runstate_tui.multirun as multirun_mod
@@ -16,7 +16,7 @@ from tests.records import Script, write
 
 
 def _seed(tmp_path, run_id, t=100.0):
-    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create(run_id)
     s = Script()
     s.started(t, "h")
     write(ch, s.records)
@@ -50,7 +50,7 @@ async def _row_updates_and_preserves_cursor(tmp_path):
         await pilot.pause()
         t = app.query_one("#runs", DataTable)
         before = t.cursor_coordinate
-        w = create_channel("a", root=ref[1], backend="sqlite")
+        w = SqliteLogs(ref[1]).create("a")
         w.send(
             {"claim_seq": 1, "consumed_seq": 0, "t": 150.0}, topic="lifecycle.heartbeat"
         )  # lifecycle-v0.6's heartbeat names its claim

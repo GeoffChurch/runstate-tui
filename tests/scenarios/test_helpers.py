@@ -106,30 +106,30 @@ async def _log_text_extracts_strip_text():
 
 
 def test_corrupt_seq_plants_torn_and_alien(tmp_path, build_log):
-    from runstate import create_channel
+    from runstate import SqliteLogs
 
     from tests.helpers import corrupt_seq
 
-    w = create_channel("r", root=tmp_path, backend="sqlite")
+    w = SqliteLogs(tmp_path).create("r")
     w.send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, topic="lifecycle.started")
     w.close()
     corrupt_seq(tmp_path, "r", 1, literal="42")
-    r = create_channel("r", root=tmp_path, backend="sqlite")
+    r = SqliteLogs(tmp_path).create("r")
     got = r.read(after=0)
     assert got[0].body == 42  # alien body decoded as a bare int
     r.close()
 
 
 def test_corrupt_seq_plants_byte_torn_body(tmp_path):
-    from runstate import create_channel
+    from runstate import SqliteLogs
 
     from tests.helpers import corrupt_seq
 
-    w = create_channel("torn", root=tmp_path, backend="sqlite")
+    w = SqliteLogs(tmp_path).create("torn")
     w.send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, topic="lifecycle.started")
     w.close()
     corrupt_seq(tmp_path, "torn", 1)  # default literal="{not json"
-    r = create_channel("torn", root=tmp_path, backend="sqlite")
+    r = SqliteLogs(tmp_path).create("torn")
     with pytest.raises(json.JSONDecodeError):
         r.latest("lifecycle.started")
     r.close()
@@ -151,12 +151,12 @@ def test_foreign_db_is_valid_sqlite_with_alien_schema(foreign_db):
 
 
 def test_held_writer_sqlite_run_stays_open_and_appends_live(held_writer_sqlite_run):
-    from runstate import create_channel
+    from runstate import SqliteLogs
 
     ref, send = held_writer_sqlite_run
     send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, "lifecycle.started")
-    run_id, root, backend = ref
-    reader = create_channel(run_id, root=root, backend=backend)
+    run_id, root, _backend = ref
+    reader = SqliteLogs(root).create(run_id)
     try:
         assert reader.latest("lifecycle.started") is not None
     finally:
@@ -172,7 +172,7 @@ def test_advance_tick_runs_a_manual_tick_and_the_table_reads_it(tmp_path):
 
 
 async def _advance_tick_and_table(tmp_path):
-    from runstate import create_channel
+    from runstate import SqliteLogs
     from textual.app import App, ComposeResult
     from textual.coordinate import Coordinate
     from textual.widgets import DataTable
@@ -182,7 +182,7 @@ async def _advance_tick_and_table(tmp_path):
     from runstate_tui.env import Env
     from tests.helpers import advance_tick
 
-    ch = create_channel("adv", root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create("adv")
     ch.send(
         {"handle": "local://h/1", "t": 100.0, "resume_from": None, "sources": []},
         topic="lifecycle.started",
@@ -212,16 +212,16 @@ async def _advance_tick_and_table(tmp_path):
 
 
 def test_log_path_and_move_log_address_a_format(tmp_path):
-    from runstate import LOG_FORMAT, LogFormatMismatch, attach_channel, create_channel
+    from runstate import LOG_FORMAT, LogFormatMismatch, SqliteLogs
 
     from tests.helpers import log_path, move_log
 
     assert log_path(tmp_path, "r") == tmp_path / f"v{LOG_FORMAT}" / "r.db"
-    w = create_channel("r", root=tmp_path, backend="sqlite")
+    w = SqliteLogs(tmp_path).create("r")
     w.send({"handle": "h", "t": 1.0, "resume_from": None, "sources": []}, topic="lifecycle.started")
     w.close()
-    assert log_path(tmp_path, "r").exists()  # create_channel births at that address
+    assert log_path(tmp_path, "r").exists()  # create births at that address
     moved = move_log(tmp_path, "r", to=log_path(tmp_path, "r", version="0.3.0"))
     assert moved.exists() and not log_path(tmp_path, "r").exists()
     with pytest.raises(LogFormatMismatch):
-        attach_channel("r", root=tmp_path)  # the address is the format
+        SqliteLogs(tmp_path).attach("r")  # the address is the format

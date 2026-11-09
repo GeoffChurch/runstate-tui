@@ -800,7 +800,7 @@ wheels = [
 [[package]]
 name = "runstate"
 version = "0.4.0.dev0"
-source = { git = "https://github.com/GeoffChurch/runstate?rev=a6e9ea32b4f5d25ba6c8aa9c0394f270dde38d96#a6e9ea32b4f5d25ba6c8aa9c0394f270dde38d96" }
+source = { git = "https://github.com/GeoffChurch/runstate?rev=4fa40b5212af76937a26d43542795705a55043d6#4fa40b5212af76937a26d43542795705a55043d6" }
 
 [[package]]
 name = "runstate-tui"
@@ -832,7 +832,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "runstate", git = "https://github.com/GeoffChurch/runstate?rev=a6e9ea32b4f5d25ba6c8aa9c0394f270dde38d96" },
+    { name = "runstate", git = "https://github.com/GeoffChurch/runstate?rev=4fa40b5212af76937a26d43542795705a55043d6" },
     { name = "textual", specifier = ">=8.2.8" },
 ]
 provides-extras = ["dev"]

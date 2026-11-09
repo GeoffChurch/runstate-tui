@@ -14,12 +14,11 @@ from runstate import (
     RunNotFound,
     RunResult,
     Topic,
-    attach_channel,
     await_consumed,
     peek_terminal,
 )
 
-from .resolver import RunRef
+from .resolver import RunRef, place_of
 from .table import describe_format_error
 from .types import Severity, Status
 
@@ -148,17 +147,16 @@ def dispatch_stop(
 ) -> StopOutcome:
     """Open the run by ref, run the handshake, close the channel after.
 
-    attach_channel (never create_channel): controlling a run must NOT fabricate a
+    The place's `attach` (never `create`): controlling a run must NOT fabricate a
     phantom `<run_id>.db`, and must NOT schema-mutate a foreign valid sqlite db
     reached through a stale pointer (spec §8) — both, plus a genuinely-empty run,
     are `RunNotFound` now, reported UNDELIVERED (missing) without any write. A log
     in another format raises a `LogFormatError` ⇒ UNDELIVERED, naming the action. A
     corrupt/non-sqlite db still raises `sqlite3.DatabaseError` (`_OPEN_ERRORS`) ⇒
-    UNDELIVERED (unopenable). attach_channel is writable, so the stop still sends
+    UNDELIVERED (unopenable). An attached channel is writable, so the stop still sends
     into a real run."""
-    run_id, root, backend = ref
     try:
-        channel = attach_channel(run_id, root=root, backend=backend)
+        channel = place_of(ref).attach(ref[0])
     except RunNotFound:
         return StopOutcome(StopResult.UNDELIVERED, request_id, "no such run (missing)")
     except LogFormatError as exc:

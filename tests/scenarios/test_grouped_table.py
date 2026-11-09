@@ -5,7 +5,7 @@ top-level `App`, so `snap_compare` takes the instance directly."""
 
 from __future__ import annotations
 
-from runstate import create_channel
+from runstate import SqliteLogs
 from textual.widgets import DataTable
 
 from runstate_tui.env import Env
@@ -15,7 +15,7 @@ from tests.records import Script, write
 
 def _seed(tmp_path, run_id, t=100.0):
     """A claimed run (log format 0.4.0): its `started` at t, no commits yet."""
-    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create(run_id)
     s = Script()
     s.started(t, "h")
     write(ch, s.records)

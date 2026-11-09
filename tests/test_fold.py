@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from runstate import Outcome, Tier, create_channel, last_activity, peek_terminal, report_death
+from runstate import Outcome, SqliteLogs, Tier, last_activity, peek_terminal, report_death
 
 from runstate_tui import status_fold
 from runstate_tui.env import Env
@@ -25,7 +25,7 @@ def _held_run(commits, t=1.0):
 
 
 def _sqlite_run(tmp_path, run_id, script):
-    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = SqliteLogs(tmp_path).create(run_id)
     write(writer, script.records)
     writer.close()
     return (run_id, str(tmp_path), "sqlite")
@@ -73,7 +73,7 @@ def test_guarded_degrades_an_alien_non_dict_body_to_a_malformed_issue(tmp_path):
     # (undecodable JSON, still propagates uncaught).
     ref = _sqlite_run(tmp_path, "alien", _held_run(1))
     corrupt_seq(tmp_path, "alien", 2, literal="42")  # the commit
-    ch = create_channel(ref[0], root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create(ref[0])
     try:
         value, issue = guarded(last_activity, ch)
         assert value is None
@@ -296,7 +296,7 @@ def test_a_malformed_value_degrades_the_reading_alone(build_log):
 def test_a_fold_held_across_polls_equals_a_cold_one(tmp_path):
     # the polled path: one RunFolds across ticks, and each tick's answers equal a cold
     # fold's (runstate's contract: incremental equals pure after every step)
-    ch = create_channel("held", root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create("held")
     w = worker(ch)
     held = _folds("loss")
     for i in range(5):
@@ -379,7 +379,7 @@ def test_a_withdrawn_stop_is_spent(build_log):
 
 def test_a_real_worker_and_a_real_death_report(tmp_path):
     # end to end through runstate's writers: the Worker commits; report_death ends it
-    ch = create_channel("real", root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create("real")
     w = worker(ch, clock=100.0)
     w.emit("loss", 0.5)
     w.commit()

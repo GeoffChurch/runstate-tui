@@ -1,7 +1,7 @@
 import sqlite3
 
 import pytest
-from runstate import create_channel
+from runstate import SqliteLogs
 
 from runstate_tui.env import Env
 from runstate_tui.pool import ChannelPool, fold_frame
@@ -12,7 +12,7 @@ from tests.records import Script, write
 
 
 def _seed(tmp_path, run_id, t=100.0):
-    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create(run_id)
     s = Script()
     s.started(t, "h")
     write(ch, s.records)
@@ -106,7 +106,7 @@ def test_pool_lru_evicts_beyond_cap(tmp_path):
 def test_row_for_evicts_a_pooled_run_whose_db_file_vanishes(tmp_path):
     # The pool's cached-handle self-heal path: a cached sqlite handle keeps reading its
     # already-open (now-deleted) inode via the WAL fd, so the fold can't detect the loss --
-    # hence row_for re-attaches CACHED handles each tick (attach_channel guards the
+    # hence row_for re-attaches CACHED handles each tick (the never-creating open guards the
     # cold-open). A run's .db can vanish mid-session (deleted out from under a live cockpit)
     # after the pool cached its channel; the NEXT fold's re-attach must catch this, evict
     # the now-dangling handle, and render a loud `missing` row -- not serve a phantom read
@@ -161,7 +161,7 @@ def test_pool_holds_folds_beside_the_channel_and_reads_only_new_records(tmp_path
     # the polled path: a pooled run's folds survive across frames, so frame k reads only
     # what landed since frame k-1, and its row equals a cold fold's
     ref = ("live", str(tmp_path), "sqlite")
-    writer = create_channel("live", root=tmp_path, backend="sqlite")
+    writer = SqliteLogs(tmp_path).create("live")
     s = Script()
     s.started(100.0)
     write(writer, s.records)

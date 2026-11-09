@@ -8,7 +8,7 @@ same as `test_detail.py`'s `Host()` case, no extra wrapping needed."""
 
 from __future__ import annotations
 
-from runstate import Outcome, create_channel
+from runstate import Outcome, SqliteLogs
 from textual.widgets import DataTable
 
 from runstate_tui.env import Env
@@ -20,7 +20,7 @@ from tests.records import Script, write
 
 def _seed(tmp_path, run_id, t=100.0):
     """A claimed run (log format 0.4.0): its `started` at t, no commits yet."""
-    ch = create_channel(run_id, root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create(run_id)
     s = Script()
     s.started(t, "h")
     write(ch, s.records)
@@ -55,7 +55,7 @@ def test_log_format_snapshot(snap_compare, tmp_path):
     w = Script(records=[], claim=1)
     w.commit(120.0)
     w.died(Outcome.KILLED, "slurm:TIMEOUT", 140.0)
-    ch = create_channel("migrated", root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create("migrated")
     write(ch, w.records)
     ch.close()
     old = _seed(tmp_path, "still-030")

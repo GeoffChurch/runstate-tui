@@ -6,18 +6,17 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 from runstate import (
-    Channel,
     Envelope,
     LogFormatError,
     LogFormatMismatch,
     LogFormatMissing,
+    Reader,
     RunNotFound,
-    attach_channel,
 )
 
 from .env import Env
 from .fold import RunFolds, locate_torn_seq, status_fold
-from .resolver import Resolver, RunRef
+from .resolver import Resolver, RunRef, place_of
 from .types import Issue, IssueKind, Row, Severity, Status, StatusKind
 
 _OPEN_ERRORS = (sqlite3.DatabaseError, sqlite3.OperationalError, PermissionError, OSError)
@@ -153,7 +152,7 @@ def _wrong_format(exc: LogFormatError) -> Row:
 
 
 def open_row_for(exc: Exception) -> Row:
-    """The row for a run `attach_channel` refused: no records -> `missing`, another
+    """The row for a run whose open was refused: no records -> `missing`, another
     format -> the loud format row, corrupt/non-sqlite/unopenable -> `unreadable`. Raises
     anything else, which is a bug the caller's fold-error containment reports."""
     if isinstance(exc, RunNotFound):
@@ -165,7 +164,7 @@ def open_row_for(exc: Exception) -> Row:
     raise exc
 
 
-def fold_open_channel(channel: Channel, env: Env, folds: RunFolds) -> Row:
+def fold_open_channel(channel: Reader, env: Env, folds: RunFolds) -> Row:
     """Fold an ALREADY-OPEN channel with the integrity guards, WITHOUT closing it.
     A byte-torn (json.JSONDecodeError) -> loud `corrupt` carrying the located seq; a
     substrate fault mid-read -> `unreadable`. open_and_fold closes in its own finally;
@@ -180,15 +179,15 @@ def fold_open_channel(channel: Channel, env: Env, folds: RunFolds) -> Row:
 
 
 def open_and_fold(ref: RunRef, env: Env, folds: RunFolds) -> Row:
-    run_id, root, backend = ref
-    # attach_channel (never create_channel): observing a run must NOT fabricate a
+    run_id = ref[0]
+    # a reader (never a create): observing a run must NOT fabricate a
     # phantom <run_id>.db, and must NOT schema-mutate a foreign valid sqlite db under a
     # stale pointer — both, plus a genuinely-empty run, are `RunNotFound` -> `missing`
     # (a run exists iff it has records; spec channel-locators.md). A log in another format
     # raises a `LogFormatError` -> the loud format row. Only corrupt/non-sqlite bytes still
     # raise `sqlite3.DatabaseError` -> `unreadable`.
     try:
-        channel = attach_channel(run_id, root=root, backend=backend)
+        channel = place_of(ref).reader(run_id)
     except (RunNotFound, LogFormatError, *_OPEN_ERRORS) as exc:
         return open_row_for(exc)
     try:
@@ -208,13 +207,13 @@ def read_log_delta(
     by `filter`. Missing/other-format/unreadable/substrate-fault/byte-torn -> [] (the
     header carries the run's status, including the loud `corrupt` and format verdicts,
     via render_single/open_and_fold)."""
-    run_id, root, backend = ref
-    # attach_channel (never create_channel): never fabricate a phantom db nor mutate a
+    run_id = ref[0]
+    # a reader (never a create): never fabricate a phantom db nor mutate a
     # foreign one. A run with no records (missing/empty/foreign) raises `RunNotFound`; a
     # log in another format a `LogFormatError`; corrupt/non-sqlite a `_OPEN_ERRORS` member
     # — each degrades the tail to [] (the header carries the loud verdict).
     try:
-        channel = attach_channel(run_id, root=root, backend=backend)
+        channel = place_of(ref).reader(run_id)
     except (RunNotFound, LogFormatError, *_OPEN_ERRORS):
         return []
     try:

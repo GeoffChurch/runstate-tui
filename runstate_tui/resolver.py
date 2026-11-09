@@ -5,13 +5,28 @@ import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
+from runstate import Logs, PostgresLogs, SqliteLogs
 from runstate.formats import LegacyAddress, NewerFormatRoot, VersionedAddress, sqlite_address
 
-RunRef = tuple[str, str, str]  # (run_id, root, backend) — attach_channel/create_channel inputs
+RunRef = tuple[str, str, str]  # (run_id, root, backend): a run, and where its log is (`place_of`)
 Attrs = Mapping[str, str]  # per-row relational metadata — grouping + labeling ONLY (no fold input)
 Resolver = Callable[
     [float], list[tuple[RunRef, Attrs]]
 ]  # Time -> [(ref, attrs)] (re-resolved each frame)
+
+
+def place_of(ref: RunRef) -> Logs:
+    """The place a ref's log is in, built from the ref's strings: the one point where the
+    cockpit reads a backend as a string (a ref comes from a path or a manifest, which hold
+    strings). Opening is the place's: `place_of(ref).reader(run_id)` to observe, which never
+    creates and cannot write, and `.attach(run_id)` to send a stop. A backend the cockpit
+    cannot open raises `ValueError`, which a table frame reports as a loud `error` row."""
+    _run_id, root, backend = ref
+    if backend == "sqlite":
+        return SqliteLogs(root)
+    if backend == "postgres":
+        return PostgresLogs(root)
+    raise ValueError(f"unknown backend {backend!r} (expected 'sqlite' or 'postgres')")
 
 
 def const_resolver(ref: RunRef) -> Resolver:
@@ -21,7 +36,7 @@ def const_resolver(ref: RunRef) -> Resolver:
 
 
 def ref_from_path(path: str) -> RunRef | None:
-    """The RunRef `attach_channel` takes for a sqlite log's path, by runstate's own
+    """The RunRef for a sqlite log's path, by runstate's own
     inverse of its address scheme (`runstate.formats.sqlite_address`, log-formats.md §3),
     or None when the path is the address of no run (a sidecar, an unregistered older
     ``vX.Y.Z/`` directory). Every copy of one run (its current log, sealed older ones, a
@@ -44,7 +59,7 @@ def ref_from_path(path: str) -> RunRef | None:
 
 def explicit_resolver(refs: list[RunRef]) -> Resolver:
     """A fixed IndexSet — the safe multi-run resolver: the refs it yields are opened
-    via `attach_channel`, which never creates, so resolving a stale/foreign pointer
+    through `place_of(ref).reader`, which never creates, so resolving a stale/foreign pointer
     can't fabricate or mutate a run. Exact duplicate refs are dropped (order preserved)
     so each run is one pooled channel and one DataTable row. Attribute-less: every ref is
     paired with empty attrs, so grouping/labeling fall back to the disambiguated stem."""
@@ -80,7 +95,7 @@ def _db_files(root: Path) -> Iterator[Path]:
 def glob_resolver(root: str) -> Resolver:
     """A LIVE resolver over a directory: each frame, discover every ``*.db`` run log under
     `root` (recursively, through symlinked directories, `_db_files`), in any format, and
-    return one (RunRef, {}) pair per run. Matches open via ``attach_channel`` (never
+    return one (RunRef, {}) pair per run. Matches open through a reader (never
     create), so a stale / foreign / half-written ``.db`` reads ``missing`` /
     ``unreadable`` / a format row and is left byte-identical -- the fold classifies it,
     the resolver does not pre-filter. Order is irrelevant: the table sorts on the

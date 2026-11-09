@@ -19,7 +19,7 @@ import sqlite3
 import time
 
 import pytest
-from runstate import Outcome, Reap, Tier, create_channel
+from runstate import Outcome, Reap, SqliteLogs, Tier
 
 from runstate_tui import open_and_fold, status_fold
 from runstate_tui.env import Env
@@ -46,7 +46,7 @@ def _sqlite_run(tmp_path, run_id, script):
     `(run_id, root, "sqlite")` -- the integrity scenarios below need a real file to
     tear with `corrupt_seq` or overlay with `foreign_db`, unlike `build_log`'s
     in-memory channel."""
-    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = SqliteLogs(tmp_path).create(run_id)
     write(writer, script.records)
     writer.close()
     return (run_id, str(tmp_path), "sqlite")
@@ -290,7 +290,7 @@ def test_alien_started_body_malformed(tmp_path):
 def test_foreign_valid_db_reads_missing_and_is_left_byte_identical(foreign_db):
     # THE PAYOFF (spec channel-locators.md; the PR #14 harm, now pinned FIXED): a VALID
     # sqlite file with an alien (non-runstate) schema reached through a stale pointer is
-    # never schema-mutated. attach_channel opens `mode=rw` and only PROBES for a `log`
+    # never schema-mutated. The open is `mode=rw` and only PROBES for a `log`
     # table; "no such table: log" is RunNotFound -> `missing`, and NOTHING is written.
     run_id, root, _backend = foreign_db
     dbfile = str(log_path(root, run_id))

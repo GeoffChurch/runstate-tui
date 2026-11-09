@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from runstate import Outcome, create_channel
+from runstate import Outcome, SqliteLogs
 from textual.app import App
 
 from runstate_tui.app import SingleRunApp
@@ -38,7 +38,7 @@ def _strip_window_buttons(svg: str) -> str:
 def _write(root: Path, rid: str, script: Script) -> RunRef:
     """Write a hand-built log format 0.4.0 run (fixed handles and clocks, so the
     screenshots are deterministic) and return its RunRef."""
-    ch = create_channel(rid, root=root, backend="sqlite")
+    ch = SqliteLogs(root).create(rid)
     write(ch, script.records)
     ch.close()
     return (rid, str(root), "sqlite")
@@ -142,10 +142,10 @@ async def scene_integrity(out_dir: Path) -> Path:
     _write(root, "train-gpt2", _training(280.0, 292.0, 10, handle="local://h/1"))
     corrupt_seq(root, "train-gpt2", 2)  # a byte-torn commit -> corrupt (⚠⚠ + red dot)
 
-    # not a sqlite database at all, at the current format's address -- attach_channel's
+    # not a sqlite database at all, at the current format's address -- the reader's
     # records probe raises sqlite3.DatabaseError, caught by open_and_fold's _OPEN_ERRORS ->
     # unreadable (red dot, no marker). Distinct from a foreign *valid* sqlite db, which
-    # attach_channel safely reads as `missing` (no `log` table -> RunNotFound) leaving it
+    # a reader safely reads it as `missing` (no `log` table -> RunNotFound) leaving it
     # byte-identical (pinned in tests/scenarios/test_fold_plane.py, the foreign-valid-db test).
     log_path(root, "eval-glue").write_bytes(b"this is not a sqlite database")
 

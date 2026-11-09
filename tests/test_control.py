@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
-from runstate import Heartbeat, Nak, NakReason, Topic, create_channel
+from runstate import Heartbeat, Nak, NakReason, SqliteLogs, Topic
 
 from runstate_tui.control import StopOutcome, StopResult, dispatch_stop, stop_run
 from runstate_tui.types import Severity
@@ -14,7 +14,7 @@ from tests.records import Script, worker, write
 
 
 def _run(tmp_path: Path, run_id: str):
-    return create_channel(run_id, root=str(tmp_path), backend="sqlite")
+    return SqliteLogs(str(tmp_path)).create(run_id)
 
 
 def _claim(ch, t=1.0):
@@ -214,7 +214,7 @@ def test_dispatch_stop_to_an_older_format_log_is_undelivered_naming_the_migratio
 def test_dispatch_stop_opens_sends_and_reports_unsafe_when_unserved(tmp_path):
     # a real, existing run with no worker: dispatch attaches it, sends the stop, and
     # the bounded handshake times out -> UNSAFE (proves attach+send+close wiring
-    # end-to-end). Seed one record so the run HAS records -> attach_channel finds it
+    # end-to-end). Seed one record so the run HAS records -> attach finds it
     # (a run exists iff it has records; an empty run would attach as RunNotFound).
     seed = _run(tmp_path, "live")
     _claim(seed)
@@ -229,7 +229,7 @@ def test_dispatch_stop_opens_sends_and_reports_unsafe_when_unserved(tmp_path):
 
 def test_dispatch_stop_unopenable_run_is_undelivered(tmp_path):
     # a real file that IS present but is NOT a valid sqlite db (non-sqlite bytes):
-    # attach_channel's connect succeeds, then the records probe raises
+    # attach's connect succeeds, then the records probe raises
     # sqlite3.DatabaseError ("file is not a database") -- NOT a RunNotFound miss --
     # which dispatch_stop's `except _OPEN_ERRORS` maps to UNDELIVERED (unopenable).
     log_path(tmp_path, "garbage").parent.mkdir()
@@ -241,7 +241,7 @@ def test_dispatch_stop_unopenable_run_is_undelivered(tmp_path):
 
 def test_dispatch_stop_not_a_dir_root_is_undelivered_missing(tmp_path):
     # root points at a regular file: no format's address under it exists (it is not a
-    # directory), so attach_channel raises RunNotFound (same class as an absent file)
+    # directory), so attach raises RunNotFound (same class as an absent file)
     # -> dispatch_stop's `except RunNotFound` -> UNDELIVERED (missing).
     not_a_dir = tmp_path / "not_a_dir"
     not_a_dir.write_text("x")

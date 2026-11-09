@@ -19,7 +19,7 @@ ones, and so can this repo's.
 - **Discovery.** Listing the runs in a format's schema (`runstate_v0_4_0`) is a query the address
   scheme does not export, the same gap as a sqlite root's inverse
   ([runstate#64](https://github.com/GeoffChurch/runstate/issues/64)). A run's absence needs no
-  query: `attach_channel` raises `RunNotFound`, and a pooled Postgres handle reads the live table.
+  query: a place's `reader` raises `RunNotFound`, and a pooled Postgres handle reads the live table.
 - **Attributes.** A run's labels and groups come from the resolver, never from its id; on a server
   they would come from a consumer's own table or a manifest beside it.
 - **Liveness.** On Postgres the session probe is evidence of a death (runstate's `SessionProbe`,

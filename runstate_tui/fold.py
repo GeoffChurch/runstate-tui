@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from runstate import (
-    Channel,
     Commits,
     Envelope,
     Head,
@@ -18,6 +17,7 @@ from runstate import (
     MalformedRecordError,
     PendingStops,
     PrefixLen,
+    Reader,
     RunResult,
     Tier,
     Topic,
@@ -72,7 +72,7 @@ class RunFolds:
         )
 
 
-def locate_torn_seq(channel: Channel) -> int | None:
+def locate_torn_seq(channel: Reader) -> int | None:
     """Find the seq of the first record whose decode raises (append-only contiguity):
     walk read(after=k, limit=1); a raising probe localizes the tear at k+1. Returns
     None if no tear is found (the caller degrades to an unlocalized message)."""
@@ -89,7 +89,7 @@ def locate_torn_seq(channel: Channel) -> int | None:
     return None
 
 
-def guarded(fn: Callable[[Channel], T], channel: Channel) -> tuple[T | None, Issue | None]:
+def guarded(fn: Callable[[Reader], T], channel: Reader) -> tuple[T | None, Issue | None]:
     """A read that degrades a decodable-but-wrong-shape record to a MALFORMED issue so
     the run's other factors survive: runstate's MalformedRecordError (schema-invalid), or
     an AttributeError/TypeError from a non-dict body (`42`, `[1,2,3]`). The exact exception
@@ -143,7 +143,7 @@ def _skipped_issue(result: RunResult) -> Issue | None:
 
 
 def reconcile_status(
-    channel: Channel, env: Env, now: float
+    channel: Reader, env: Env, now: float
 ) -> tuple[Status, float | None, list[Issue]]:
     issues: list[Issue] = []
     result, term_issue = guarded(peek_terminal, channel)
@@ -191,8 +191,8 @@ def reconcile_status(
     return status, freshness, issues
 
 
-def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | None]:
-    def _started_t(ch: Channel) -> object:
+def read_elapsed(channel: Reader, now: float) -> tuple[float | None, Issue | None]:
+    def _started_t(ch: Reader) -> object:
         started = ch.read(topics=[Topic.LIFECYCLE_STARTED], limit=1)
         # alien non-dict body -> AttributeError here -> caught by guarded() below
         return started[0].body.get("t") if started else None
@@ -215,7 +215,7 @@ def read_elapsed(channel: Channel, now: float) -> tuple[float | None, Issue | No
 
 
 def read_lineage(
-    channel: Channel, folds: RunFolds
+    channel: Reader, folds: RunFolds
 ) -> tuple[int | None, Reading | None, list[Issue]]:
     """The frontier and the objective's reading, both at ONE head resolved this poll, so
     they agree. The frontier is `count(Commits(), head)` (0 on the empty lineage); the
@@ -225,7 +225,7 @@ def read_lineage(
     alone, so the frontier survives it -- one MALFORMED issue per failed read."""
     issues: list[Issue] = []
 
-    def _frontier(ch: Channel) -> tuple[Head, int]:
+    def _frontier(ch: Reader) -> tuple[Head, int]:
         head = folds.head.poll(ch)
         return head, folds.commits.poll(ch, head)
 
@@ -239,7 +239,7 @@ def read_lineage(
     if objective is None:
         return frontier, None, issues
 
-    def _reading(ch: Channel) -> Reading | None:
+    def _reading(ch: Reader) -> Reading | None:
         element = objective.last.poll(ch, head)
         if element is None:
             return None
@@ -252,7 +252,7 @@ def read_lineage(
     return frontier, reading, issues
 
 
-def status_fold(channel: Channel, env: Env, folds: RunFolds) -> Row:
+def status_fold(channel: Reader, env: Env, folds: RunFolds) -> Row:
     now = env.clock()  # captured once per frame, threaded below
     issues: list[Issue] = []
 
@@ -266,7 +266,7 @@ def status_fold(channel: Channel, env: Env, folds: RunFolds) -> Row:
     if elapsed_issue is not None:
         issues.append(elapsed_issue)
 
-    def _episode(ch: Channel) -> str | None:
+    def _episode(ch: Reader) -> str | None:
         e: Envelope | None = latest_episode(ch)
         if e is None:
             return None

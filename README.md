@@ -100,5 +100,6 @@ step, with runstate 0.4.0 (`runstate migrate <root>`), in the order runstate's
 verdict `peek_terminal` (a `RunResult`'s `outcomes`, `tier`, `reports`, `error` and `malformed`),
 `last_activity` and `latest_episode`; the held folds `HeadFold`, `PrefixLen(Commits())`,
 `LastElement`, `LiveDemand` and `PendingStops`, which keep a polled row at O(new records);
-`await_consumed` for the stop handshake; and `attach_channel`, which refuses a log in another format
-with `LogFormatMismatch` / `LogFormatMissing`.
+`await_consumed` for the stop handshake; and a place's opens (`SqliteLogs(root).reader(run_id)` to
+observe, `.attach(run_id)` to send a stop), which refuse a log in another format with
+`LogFormatMismatch` / `LogFormatMissing`.

@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 
-from runstate import Channel, LogFormatError, RunNotFound, attach_channel
+from runstate import LogFormatError, Reader, RunNotFound
 
 from .env import Env
 from .fold import RunFolds
-from .resolver import Attrs, RunRef
+from .resolver import Attrs, RunRef, place_of
 from .table import _OPEN_ERRORS, EVICT_KINDS, _fold_error, fold_open_channel, open_row_for
 from .types import Row
 
@@ -19,7 +19,7 @@ class _Pooled:
     """An open channel and the folds held beside it: evicted together, so a re-opened
     run is folded from scratch, never resumed from another handle's partial state."""
 
-    channel: Channel
+    channel: Reader
     folds: RunFolds
 
 
@@ -50,16 +50,16 @@ class ChannelPool:
             self._evict(ref)
 
     def row_for(self, ref: RunRef, frame_env: Env) -> Row:
-        run_id, root, backend = ref
+        run_id, _root, backend = ref
         pooled = self._open.get(ref)
         if pooled is None:
-            # cold open via attach_channel: never fabricate a phantom db nor mutate a
+            # cold open through a reader: never fabricate a phantom db nor mutate a
             # foreign one. A run with no records (missing/empty/foreign valid db) raises
             # `RunNotFound` -> honest `missing`; a log in another format a `LogFormatError`
             # -> the loud format row; corrupt/non-sqlite `_OPEN_ERRORS` -> `unreadable`.
             # None is cached, so each is retried next tick (a run migrated meanwhile opens).
             try:
-                ch = attach_channel(run_id, root=root, backend=backend)
+                ch = place_of(ref).reader(run_id)
             except (RunNotFound, LogFormatError, *_OPEN_ERRORS) as exc:
                 return open_row_for(exc)
             if len(self._open) >= self._cap:
@@ -76,7 +76,7 @@ class ChannelPool:
             # unreadable one is `unreadable`, and the handle and its folds are evicted. A
             # Postgres handle reads the live table, so it has no stale inode to catch.
             try:
-                attach_channel(run_id, root=root, backend=backend).close()
+                place_of(ref).reader(run_id).close()
             except (RunNotFound, LogFormatError, *_OPEN_ERRORS) as exc:
                 self._evict(ref)
                 return open_row_for(exc)

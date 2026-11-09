@@ -2,7 +2,7 @@ import asyncio
 import threading
 import time
 
-from runstate import create_channel
+from runstate import SqliteLogs
 from textual.widgets import Static
 
 from runstate_tui.app import SingleRunApp
@@ -15,7 +15,7 @@ from tests.records import Script, write
 
 
 def _claimed_sqlite_run(tmp_path, commits=0):
-    ch = create_channel("r", root=tmp_path, backend="sqlite")
+    ch = SqliteLogs(tmp_path).create("r")
     s = Script()
     s.started(100.0)
     for i in range(commits):

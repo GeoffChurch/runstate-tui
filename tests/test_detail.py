@@ -3,7 +3,7 @@ import threading
 import time
 
 from rich.text import Text
-from runstate import create_channel
+from runstate import SqliteLogs
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Input, Static
@@ -24,7 +24,7 @@ def _seed_rich(tmp_path):
     memory): DrillDownScreen and read_log_delta take a RunRef and read from disk, not an
     already-open channel."""
     run_id = "rich"
-    writer = create_channel(run_id, root=tmp_path, backend="sqlite")
+    writer = SqliteLogs(tmp_path).create(run_id)
     s = Script()
     s.started(100.0)
     s.value("loss", 0.03, 140.0)
@@ -230,7 +230,7 @@ def test_live_tail_appends_at_top_incrementally(tmp_path):
 
 async def _live_tail(tmp_path):
     ref = ("live", str(tmp_path), "sqlite")
-    w = create_channel("live", root=tmp_path, backend="sqlite")
+    w = SqliteLogs(tmp_path).create("live")
     live = Script()
     live.started(1.0, "h")
     write(w, live.records)

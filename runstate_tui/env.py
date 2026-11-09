@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
-from runstate import Channel
+from runstate import Reader
 
 
 class Liveness(Enum):
@@ -18,7 +18,7 @@ class LivenessSignal(Protocol):
     # last_activity is read once by the fold and passed in, so the signal is pure and
     # can't double-read; a channel-reading overlay (probe) still gets the channel.
     def liveness(
-        self, channel: Channel, env: Env, now: float, last_activity: float | None
+        self, channel: Reader, env: Env, now: float, last_activity: float | None
     ) -> Liveness | None: ...
 
 
@@ -27,7 +27,7 @@ class FreshnessSignal:
     """The core's only liveness signal: a pure verdict from the log's last-activity clock."""
 
     def liveness(
-        self, channel: Channel, env: Env, now: float, last_activity: float | None
+        self, channel: Reader, env: Env, now: float, last_activity: float | None
     ) -> Liveness | None:
         if last_activity is None:
             return None  # no dated activity -> no opinion (the fold decides pending)
@@ -44,7 +44,7 @@ class Env:
 
 
 def resolve_liveness(
-    channel: Channel, env: Env, now: float, last_activity: float | None
+    channel: Reader, env: Env, now: float, last_activity: float | None
 ) -> Liveness | None:
     for signal in env.liveness:  # order == precedence; overlays register ahead of freshness
         verdict = signal.liveness(channel, env, now, last_activity)
